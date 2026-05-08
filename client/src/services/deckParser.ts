@@ -61,6 +61,10 @@ const SIMPLE_DECK_LINE_PATTERN = /^\d+x?\s+.+$/;
 const COMMANDER_ANNOTATION_RE = /\s*(?:\[Commander(?:\s*\{[^}]*\})?\]|\*CMDR\*|\*Commander\*)\s*$/i;
 const COMPANION_ANNOTATION_RE = /\s*(?:\[Companion(?:\s*\{[^}]*\})?\]|\*Companion\*)\s*$/i;
 
+// Foil / finish indicators appended by various deck exporters:
+//   "1 Bolt (FDN) 123 *F*"  /  "[Foil]"  /  "(Etched)"  /  "*Foil*"  /  "F"
+const FOIL_INDICATOR_RE = /\s+(?:\*F\*|\*Foil\*|\[Foil\]|\(Foil\)|\(Etched\)|F)\s*$/i;
+
 // "Commanders" is the section label Archidekt uses when exporting with categories.
 function getNamedSection(line: string): DeckSection | null {
   const normalized = line.trim().toLowerCase();
@@ -93,6 +97,8 @@ function parseDeckEntryLine(line: string): LineParseResult | null {
     remainder = remainder.replace(COMPANION_ANNOTATION_RE, "");
     annotation = "companion";
   }
+
+  remainder = remainder.replace(FOIL_INDICATOR_RE, "");
 
   const mtgaMatch = remainder.match(/^(\d+)\s+(.+?)\s+\(([A-Z0-9]*)\)\s+(\S+)$/);
   if (mtgaMatch) {

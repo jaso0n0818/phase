@@ -311,6 +311,29 @@ Sideboard
     ]);
   });
 
+  it('strips foil indicators from MTGA-format lines', () => {
+    const content = [
+      '1 Lightning Bolt (FDN) 123 *F*',
+      '1 Counterspell (MKM) 56 [Foil]',
+      '1 Sol Ring (SOC) 128 (Etched)',
+      '1 Swords to Plowshares (STA) 10 *Foil*',
+    ].join('\n');
+    const result = detectAndParseDeck(content);
+    expect(result.main).toMatchObject([
+      { count: 1, name: 'Lightning Bolt' },
+      { count: 1, name: 'Counterspell' },
+      { count: 1, name: 'Sol Ring' },
+      { count: 1, name: 'Swords to Plowshares' },
+    ]);
+    expect(result.main[0].sourcePrinting).toEqual({ setCode: 'fdn', collectorNumber: '123' });
+  });
+
+  it('strips bare F foil suffix from MTGA-format lines', () => {
+    const result = detectAndParseDeck('1 Lightning Bolt (FDN) 123 F');
+    expect(result.main).toMatchObject([{ count: 1, name: 'Lightning Bolt' }]);
+    expect(result.main[0].sourcePrinting).toEqual({ setCode: 'fdn', collectorNumber: '123' });
+  });
+
   it('routes inline [Commander] annotations to the commander slot', () => {
     const content = `1 Zimone, Infinite Analyst (SOC) 10 [Commander {top}]
 1 Sol Ring (SOC) 128`;
