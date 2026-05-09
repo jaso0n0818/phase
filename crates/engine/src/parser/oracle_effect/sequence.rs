@@ -562,6 +562,7 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("you ")),
         value((), tag("incubate ")),
         value((), tag("it ")),
+        value((), tag("its controller ")),
         value((), tag("copy ")),
         value((), tag("double ")),
         value((), tag("goad ")),
@@ -2278,6 +2279,20 @@ mod tests {
     }
 
     #[test]
+    fn comma_then_its_controller_clause_splits() {
+        let chunks = clause_texts(
+            "exile the chosen creature, then its controller gains life equal to its mana value",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "exile the chosen creature",
+                "its controller gains life equal to its mana value"
+            ]
+        );
+    }
+
+    #[test]
     fn comma_keyword_list_does_not_split_double_strike() {
         let chunks = clause_texts(
             "creatures you control gain flying, vigilance, and double strike until end of turn",
@@ -2372,8 +2387,9 @@ mod tests {
 
     #[test]
     fn possessive_its_does_not_trigger_deconjugation() {
-        // "its controller" must NOT be deconjugated — "its" is a possessive pronoun.
-        assert!(!starts_clause_text_or_conjugated(
+        // Bare "its" must NOT be deconjugated — it is a possessive pronoun.
+        assert!(!starts_clause_text_or_conjugated("its power increases"));
+        assert!(starts_clause_text_or_conjugated(
             "its controller gains life"
         ));
     }

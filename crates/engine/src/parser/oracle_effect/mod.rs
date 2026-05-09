@@ -15141,6 +15141,35 @@ mod tests {
     }
 
     #[test]
+    fn effect_chain_exile_then_controller_gains_life_equal_to_mana_value() {
+        let def = parse_effect_chain(
+            "Exile the chosen creature, then its controller gains life equal to its mana value.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            *def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+        let Some(sub_ability) = def.sub_ability else {
+            panic!("expected controller life-gain sub-ability");
+        };
+        assert!(matches!(
+            *sub_ability.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: crate::types::ability::ObjectScope::Target
+                    }
+                },
+                player: GainLifePlayer::TargetedController
+            }
+        ));
+    }
+
+    #[test]
     fn effect_chain_with_em_dash() {
         let def = parse_effect_chain(
             "Spell mastery — Draw two cards. You gain 2 life.",

@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till};
-use nom::combinator::{all_consuming, value, verify};
+use nom::combinator::{all_consuming, opt, value, verify};
 use nom::sequence::preceded;
 use nom::Parser;
 
@@ -1967,8 +1967,11 @@ fn extract_pump_modifiers(
 /// the targeted permanent's controller gains life based on the permanent's stats.
 pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
-    tag::<_, _, OracleError<'_>>("its controller ")
+    let (after_prefix, _) = opt(tag::<_, _, OracleError<'_>>("then "))
         .parse(lower.as_str())
+        .ok()?;
+    let (after_subject, _) = tag::<_, _, OracleError<'_>>("its controller ")
+        .parse(after_prefix)
         .ok()?;
     if !nom_primitives::scan_contains(&lower, "gain")
         || !nom_primitives::scan_contains(&lower, "life")
@@ -2001,11 +2004,10 @@ pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<Pars
         }
     } else {
         // Try to parse a fixed amount: "its controller gains 3 life"
-        let after = &lower["its controller ".len()..];
         let after = alt((tag::<_, _, OracleError<'_>>("gains "), tag("gain ")))
-            .parse(after)
+            .parse(after_subject)
             .map(|(rest, _)| rest)
-            .unwrap_or(after);
+            .unwrap_or(after_subject);
         QuantityExpr::Fixed {
             value: parse_number(after).map(|(n, _)| n as i32).unwrap_or(1),
         }
@@ -2536,6 +2538,26 @@ mod tests {
             "Its controller gains life equal to its mana value.",
         )
         .expect("targeted controller mana value gain life clause");
+
+        assert!(matches!(
+            clause.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: crate::types::ability::ObjectScope::Target
+                    }
+                },
+                player: GainLifePlayer::TargetedController
+            }
+        ));
+    }
+
+    #[test]
+    fn targeted_controller_gain_life_accepts_then_prefix() {
+        let clause = try_parse_targeted_controller_gain_life(
+            "Then its controller gains life equal to its mana value.",
+        )
+        .expect("chained targeted controller mana value gain life clause");
 
         assert!(matches!(
             clause.effect,
