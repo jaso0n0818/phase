@@ -8440,6 +8440,28 @@ mod tests {
     }
 
     #[test]
+    fn trigger_intervening_if_artifact_or_creature_was_put_into_graveyard_from_battlefield() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if an artifact or creature was put into a graveyard from the battlefield this turn, put a +1/+1 counter on this creature.",
+            "Ichor Shade",
+        );
+        assert!(matches!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeCountThisTurn {
+                        from: Some(Zone::Battlefield),
+                        to: Some(Zone::Graveyard),
+                        filter: TargetFilter::Or { .. },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        ));
+    }
+
+    #[test]
     fn trigger_intervening_if_source_dealt_damage_to_opponent_this_turn() {
         let def = parse_trigger_line(
             "At the beginning of each end step, if this creature dealt damage to an opponent this turn, put a +1/+1 counter on it.",

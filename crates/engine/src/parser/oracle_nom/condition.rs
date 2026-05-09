@@ -1438,6 +1438,7 @@ fn parse_zone_history_condition(input: &str) -> OracleResult<'_, StaticCondition
         parse_card_left_your_graveyard_this_turn,
         parse_permanent_put_into_your_hand_from_battlefield_this_turn,
         parse_card_put_into_your_graveyard_from_anywhere_this_turn,
+        parse_object_put_into_graveyard_from_battlefield_this_turn,
         parse_creature_died_this_turn_conditions,
         // "a nonland permanent left the battlefield this turn" (Revolt variant)
         value(
@@ -1538,6 +1539,34 @@ fn parse_card_put_into_your_graveyard_from_anywhere_this_turn(
                 from: None,
                 to: Some(Zone::Graveyard),
                 filter: add_owned_you_non_token(filter),
+            },
+            1,
+        ),
+    ))
+}
+
+fn parse_object_put_into_graveyard_from_battlefield_this_turn(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_article(input)?;
+    let suffix = " was put into a graveyard from the battlefield this turn";
+    let (rest, type_text) = take_until(suffix).parse(rest)?;
+    let (rest, _) = tag(suffix).parse(rest)?;
+    let (filter, leftover) = parse_type_phrase(type_text.trim());
+    if !leftover.trim().is_empty() || filter == TargetFilter::Any {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::ZoneChangeCountThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Graveyard),
+                filter,
             },
             1,
         ),
@@ -5592,6 +5621,37 @@ mod tests {
             }
             other => {
                 panic!("expected owned creature-card graveyard zone-change count, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_artifact_or_creature_put_into_graveyard_from_battlefield_this_turn() {
+        let (rest, c) = parse_inner_condition(
+            "an artifact or creature was put into a graveyard from the battlefield this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneChangeCountThisTurn {
+                                from: Some(Zone::Battlefield),
+                                to: Some(Zone::Graveyard),
+                                filter: TargetFilter::Or { filters },
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(filters.len(), 2);
+            }
+            other => {
+                panic!(
+                    "expected artifact-or-creature battlefield-to-graveyard count, got {other:?}"
+                )
             }
         }
     }
