@@ -628,6 +628,13 @@ fn activatable_object_mana_actions(state: &GameState) -> Vec<GameAction> {
         return Vec::new();
     };
 
+    activatable_object_mana_actions_for_player(state, player)
+}
+
+pub(super) fn activatable_object_mana_actions_for_player(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<GameAction> {
     let mut actions = Vec::new();
     for &obj_id in &state.battlefield {
         let Some(obj) = state.objects.get(&obj_id) else {
@@ -700,8 +707,8 @@ mod tests {
     };
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
-        ResolvedAbility, UnlessCost,
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution,
+        ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter, TypedFilter, UnlessCost,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -1024,6 +1031,80 @@ mod tests {
         ));
         assert!(!flat.iter().any(
             |action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == rock)
+        ));
+    }
+
+    #[test]
+    fn legal_actions_by_object_exposes_no_tap_sacrifice_mana_abilities() {
+        let mut state = setup_priority();
+        let altar = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Phyrexian Altar".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&altar).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.tapped = true;
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: vec![
+                                ManaColor::White,
+                                ManaColor::Blue,
+                                ManaColor::Black,
+                                ManaColor::Red,
+                                ManaColor::Green,
+                            ],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Sacrifice {
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ),
+                    count: 1,
+                }),
+            );
+        }
+
+        let creature = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let (flat, _, grouped) = legal_actions_full(&state);
+
+        assert!(bucket_has(
+            &grouped,
+            altar,
+            &GameAction::ActivateAbility {
+                source_id: altar,
+                ability_index: 0,
+            },
+        ));
+        assert!(!flat.iter().any(
+            |action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == altar)
         ));
     }
 

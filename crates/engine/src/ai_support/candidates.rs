@@ -5,7 +5,6 @@ use crate::game::combat::AttackTarget;
 use crate::game::deck_loading::DeckEntry;
 use crate::game::game_object::RoomDoor;
 use crate::game::keywords;
-use crate::game::mana_abilities;
 use crate::game::mana_sources;
 use crate::types::ability::ChoiceType;
 use crate::types::ability::TargetRef;
@@ -2754,65 +2753,10 @@ fn bottom_card_actions(state: &GameState, player: PlayerId, count: u8) -> Vec<Ca
 // Note: UntapLandForMana is intentionally omitted — it is a human-only undo action.
 // AI never populates lands_tapped_for_mana, so the handler would reject it anyway.
 fn mana_tap_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction> {
-    let mut actions = Vec::new();
-    for &obj_id in &state.battlefield {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller != player || obj.tapped {
-                continue;
-            }
-            // Lands: single-option lands use TapLandForMana; multi-option lands
-            // (duals, triomes) use ActivateAbility per mana ability so the AI
-            // can choose which color to produce.
-            if obj.card_types.core_types.contains(&CoreType::Land) {
-                let land_options =
-                    mana_sources::activatable_land_mana_options(state, obj_id, player);
-                if land_options.len() == 1 {
-                    actions.push(candidate(
-                        GameAction::TapLandForMana { object_id: obj_id },
-                        TacticalClass::Mana,
-                        Some(player),
-                    ));
-                } else {
-                    // Generate one ActivateAbility per distinct mana ability index
-                    let mut seen_indices = Vec::new();
-                    for opt in &land_options {
-                        if let Some(idx) = opt.ability_index {
-                            if !seen_indices.contains(&idx) {
-                                seen_indices.push(idx);
-                                actions.push(candidate(
-                                    GameAction::ActivateAbility {
-                                        source_id: obj_id,
-                                        ability_index: idx,
-                                    },
-                                    TacticalClass::Mana,
-                                    Some(player),
-                                ));
-                            }
-                        }
-                    }
-                }
-            // CR 605.1b: Non-land permanents with mana abilities use ActivateAbility
-            } else if !obj.card_types.core_types.contains(&CoreType::Land)
-                && !mana_sources::activatable_mana_options(state, obj_id, player).is_empty()
-            {
-                if let Some(idx) = obj
-                    .abilities
-                    .iter()
-                    .position(mana_abilities::is_mana_ability)
-                {
-                    actions.push(candidate(
-                        GameAction::ActivateAbility {
-                            source_id: obj_id,
-                            ability_index: idx,
-                        },
-                        TacticalClass::Mana,
-                        Some(player),
-                    ));
-                }
-            }
-        }
-    }
-    actions
+    super::activatable_object_mana_actions_for_player(state, player)
+        .into_iter()
+        .map(|action| candidate(action, TacticalClass::Mana, Some(player)))
+        .collect()
 }
 
 fn mana_payment_actions(
@@ -3644,6 +3588,84 @@ mod tests {
             matches!(
                 candidate.action,
                 GameAction::TapLandForMana { object_id } if object_id == blank_land
+            )
+        }));
+    }
+
+    #[test]
+    fn mana_payment_actions_include_no_tap_sacrifice_mana_abilities() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        };
+
+        let altar = create_object(
+            &mut state,
+            CardId(303),
+            PlayerId(0),
+            "Phyrexian Altar".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&altar).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.tapped = true;
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: vec![
+                                ManaColor::White,
+                                ManaColor::Blue,
+                                ManaColor::Black,
+                                ManaColor::Red,
+                                ManaColor::Green,
+                            ],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Sacrifice {
+                    target: TargetFilter::Typed(
+                        crate::types::ability::TypedFilter::creature()
+                            .controller(crate::types::ability::ControllerRef::You),
+                    ),
+                    count: 1,
+                }),
+            );
+        }
+
+        let creature = create_object(
+            &mut state,
+            CardId(304),
+            PlayerId(0),
+            "Sacrifice Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let actions = candidate_actions(&state);
+
+        assert!(actions.iter().any(|candidate| {
+            matches!(
+                candidate.action,
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index: 0,
+                } if source_id == altar
             )
         }));
     }
