@@ -1403,6 +1403,27 @@ pub fn parse_type_phrase_with_ctx<'a>(
     }
 
     let mut exclude_chosen_type = false;
+    let mut exclude_owned_by_controller: Option<ControllerRef> = None;
+    let remaining_not_owned = lower[pos..].trim_start();
+    let not_owned_offset = lower[pos..].len() - remaining_not_owned.len();
+    if let Some(ref ctrl) = controller {
+        for suffix in &[
+            "but don't own",
+            "but do not own",
+            "but doesn't own",
+            "but does not own",
+        ] {
+            if tag::<_, _, OracleError<'_>>(*suffix)
+                .parse(remaining_not_owned)
+                .is_ok()
+            {
+                exclude_owned_by_controller = Some(ctrl.clone());
+                pos += not_owned_offset + suffix.len();
+                break;
+            }
+        }
+    }
+
     let remaining = lower[pos..].trim_start();
     let remaining_offset = lower[pos..].len() - remaining.len();
     for suffix in &[
@@ -1501,6 +1522,20 @@ pub fn parse_type_phrase_with_ctx<'a>(
                 TargetFilter::Not {
                     filter: Box::new(TargetFilter::Typed(
                         TypedFilter::default().properties(vec![FilterProp::IsChosenCreatureType]),
+                    )),
+                },
+            ],
+        }
+    } else {
+        filter
+    };
+    let filter = if let Some(controller) = exclude_owned_by_controller {
+        TargetFilter::And {
+            filters: vec![
+                filter,
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::default().properties(vec![FilterProp::Owned { controller }]),
                     )),
                 },
             ],
@@ -7576,6 +7611,71 @@ mod tests {
         let (filter, rest) = parse_target("the creature's controller");
         assert_eq!(filter, TargetFilter::ParentTargetController);
         assert_eq!(rest, "");
+    }
+
+    /// CR 108.3 + CR 109.5: ownership and control are distinct. "You control
+    /// but don't own" must match permanents controlled by you while excluding
+    /// objects you own, so stolen objects count and native objects do not.
+    #[test]
+    fn parse_type_phrase_you_control_but_dont_own_composes_not_owned() {
+        let (filter, rest) = parse_type_phrase("land you control but don't own");
+        assert_eq!(rest, "");
+        match filter {
+            TargetFilter::And { filters } => {
+                assert!(matches!(
+                    filters.first(),
+                    Some(TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller: Some(ControllerRef::You),
+                        ..
+                    })) if type_filters == &vec![TypeFilter::Land]
+                ));
+                assert!(matches!(
+                    filters.get(1),
+                    Some(TargetFilter::Not { filter }) if matches!(
+                        filter.as_ref(),
+                        TargetFilter::Typed(TypedFilter {
+                            properties,
+                            ..
+                        }) if properties == &vec![FilterProp::Owned {
+                            controller: ControllerRef::You
+                        }]
+                    )
+                ));
+            }
+            other => panic!("expected And filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_type_phrase_opponent_controls_but_doesnt_own_composes_not_owned() {
+        let (filter, rest) = parse_type_phrase("creature an opponent controls but doesn't own");
+        assert_eq!(rest, "");
+        match filter {
+            TargetFilter::And { filters } => {
+                assert!(matches!(
+                    filters.first(),
+                    Some(TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller: Some(ControllerRef::Opponent),
+                        ..
+                    })) if type_filters == &vec![TypeFilter::Creature]
+                ));
+                assert!(matches!(
+                    filters.get(1),
+                    Some(TargetFilter::Not { filter }) if matches!(
+                        filter.as_ref(),
+                        TargetFilter::Typed(TypedFilter {
+                            properties,
+                            ..
+                        }) if properties == &vec![FilterProp::Owned {
+                            controller: ControllerRef::Opponent
+                        }]
+                    )
+                ));
+            }
+            other => panic!("expected And filter, got {other:?}"),
+        }
     }
 
     /// CR 205.3 + CR 205.4b: "target attacking Vampire that isn't a Demon" — the

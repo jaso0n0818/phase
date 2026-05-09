@@ -11577,6 +11577,48 @@ mod tests {
     }
 
     #[test]
+    fn static_self_gets_dynamic_pt_for_each_permanent_you_control_but_dont_own() {
+        let def = parse_static_line("~ gets +1/+1 for each land you control but don't own.")
+            .expect("control-without-ownership dynamic P/T static must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+
+        let dynamic_power = def
+            .modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicPower");
+        match dynamic_power {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectCount {
+                        filter: TargetFilter::And { filters },
+                    },
+            } => {
+                assert!(matches!(
+                    filters.first(),
+                    Some(TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller: Some(ControllerRef::You),
+                        ..
+                    })) if type_filters == &vec![TypeFilter::Land]
+                ));
+                assert!(matches!(filters.get(1), Some(TargetFilter::Not { .. })));
+            }
+            other => panic!("expected ObjectCount over And filter, got {other:?}"),
+        }
+        assert!(
+            def.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })),
+            "expected AddDynamicToughness, got {:?}",
+            def.modifications
+        );
+    }
+
+    #[test]
     fn static_reduce_ability_cost_ninjutsu() {
         // CR 601.2f: "Ninjutsu abilities you activate cost {1} less to activate"
         let def = parse_static_line("Ninjutsu abilities you activate cost {1} less to activate.")
