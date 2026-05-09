@@ -3,7 +3,7 @@
 //! Replaces the Forge-style string filter parsing with typed enum matching.
 //! All filter logic works against the TargetFilter enum hierarchy from types/ability.rs.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::game::combat;
 use crate::game::game_object::GameObject;
@@ -1282,6 +1282,7 @@ fn spell_object_matches_property(
                     )
                 })
         }),
+        FilterProp::MostPrevalentCreatureTypeInLibrary => false,
         FilterProp::IsChosenColor => context.is_some_and(|context| {
             context
                 .state
@@ -1436,6 +1437,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::ToughnessGE { .. }
         | FilterProp::PowerGTSource
         | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeInLibrary
         | FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
         | FilterProp::IsChosenLandOrNonlandKind
@@ -1954,6 +1956,18 @@ fn matches_filter_prop(
                 .any(|s| s.eq_ignore_ascii_case(chosen)),
             None => false,
         },
+        FilterProp::MostPrevalentCreatureTypeInLibrary => {
+            most_prevalent_creature_types_in_library(state, obj.owner)
+                .into_iter()
+                .any(|creature_type| {
+                    subtype_matches_with_changeling(
+                        &creature_type,
+                        &obj.card_types.subtypes,
+                        &obj.keywords,
+                        &state.all_creature_types,
+                    )
+                })
+        }
         // CR 105.4: Match objects whose colors include the source's chosen color.
         // Used for "of the chosen color" (Hall of Triumph, Prismatic Strands).
         FilterProp::IsChosenColor => source
@@ -2239,6 +2253,7 @@ fn zone_change_record_matches_property(
                 .iter()
                 .any(|candidate| candidate.eq_ignore_ascii_case(chosen))
         }),
+        FilterProp::MostPrevalentCreatureTypeInLibrary => false,
         // CR 509.1b: Power comparison against the live source.
         FilterProp::PowerGTSource => {
             let source_power = state
@@ -2641,6 +2656,45 @@ fn object_shares_quality_with_reference_filter(
                 object_shares_quality_values(obj, quality, &values, &state.all_creature_types)
             })
     })
+}
+
+fn most_prevalent_creature_types_in_library(state: &GameState, owner: PlayerId) -> HashSet<String> {
+    let Some(player) = state.players.iter().find(|player| player.id == owner) else {
+        return HashSet::new();
+    };
+
+    let mut counts = HashMap::new();
+    for object_id in &player.library {
+        let Some(obj) = state.objects.get(object_id) else {
+            continue;
+        };
+        if !obj.card_types.core_types.contains(&CoreType::Creature) {
+            continue;
+        }
+        if obj.keywords.contains(&Keyword::Changeling) {
+            for creature_type in &state.all_creature_types {
+                *counts
+                    .entry(creature_type.to_ascii_lowercase())
+                    .or_insert(0) += 1;
+            }
+            continue;
+        }
+        for subtype in &obj.card_types.subtypes {
+            if state
+                .all_creature_types
+                .iter()
+                .any(|creature_type| creature_type.eq_ignore_ascii_case(subtype))
+            {
+                *counts.entry(subtype.to_ascii_lowercase()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let max_count = counts.values().copied().max().unwrap_or(0);
+    counts
+        .into_iter()
+        .filter_map(|(creature_type, count)| (count == max_count).then_some(creature_type))
+        .collect()
 }
 
 /// CR 608.2b: Validate that all targeted objects share at least one value of the named quality.
@@ -3764,6 +3818,52 @@ mod tests {
             validate_shares_quality(&state, &targets, &SharedQuality::CreatureType),
             "Two Elves should share the Elf creature type"
         );
+    }
+
+    #[test]
+    fn most_prevalent_creature_type_in_library_matches_highest_count_type() {
+        let mut state = setup();
+        state.all_creature_types = vec!["Elf".to_string(), "Goblin".to_string()];
+
+        let goblin_one = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Goblin One".to_string(),
+            Zone::Library,
+        );
+        let goblin_two = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Goblin Two".to_string(),
+            Zone::Library,
+        );
+        let elf = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Elf".to_string(),
+            Zone::Library,
+        );
+        for (id, subtype) in [(goblin_one, "Goblin"), (goblin_two, "Goblin"), (elf, "Elf")] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push(subtype.to_string());
+        }
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .properties(vec![FilterProp::MostPrevalentCreatureTypeInLibrary]),
+        );
+
+        assert!(matches_target_filter(
+            &state, goblin_one, &filter, goblin_one
+        ));
+        assert!(matches_target_filter(
+            &state, goblin_two, &filter, goblin_two
+        ));
+        assert!(!matches_target_filter(&state, elf, &filter, elf));
     }
 
     #[test]

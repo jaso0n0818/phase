@@ -1666,6 +1666,17 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
+        if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>("of the most prevalent creature type in your library")
+                .parse(remaining)
+        {
+            suffix
+                .properties
+                .push(FilterProp::MostPrevalentCreatureTypeInLibrary);
+            remaining = rest.trim_start();
+            continue;
+        }
+
         // CR 608.2c: distinct-quality suffixes constrain the chosen set, not
         // individual cards. The constraint is already encoded upstream via
         // `scan_distinct_qualities_constraint`; this arm only consumes the marker.
@@ -3237,6 +3248,30 @@ mod tests {
                 relation: SharedQualityRelation::Shares,
             } if matches!(reference.as_ref(), TargetFilter::TriggeringSource)
         )));
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched"
+        )));
+    }
+
+    #[test]
+    fn seek_most_prevalent_creature_type_emits_library_prevalence_filter() {
+        let mut ctx = ParseContext::default();
+        let details = parse_seek_details(
+            "seek a creature card of the most prevalent creature type in your library",
+            &mut ctx,
+        );
+        let TargetFilter::Typed(filter) = details.filter else {
+            panic!("expected typed filter, got {:?}", details.filter);
+        };
+        assert!(matches!(
+            filter.type_filters.as_slice(),
+            [TypeFilter::Creature]
+        ));
+        assert!(filter
+            .properties
+            .contains(&FilterProp::MostPrevalentCreatureTypeInLibrary));
         assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
             diagnostic,
             OracleDiagnostic::TargetFallback { context, .. }

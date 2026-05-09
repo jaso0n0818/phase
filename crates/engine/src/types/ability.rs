@@ -1516,6 +1516,10 @@ pub enum FilterProp {
     /// Matches objects whose subtypes include the source object's chosen creature type.
     /// Used for "of the chosen type" patterns (Cavern of Souls, Metallic Mimic).
     IsChosenCreatureType,
+    /// Matches creature cards that have a creature type tied for the highest
+    /// count among creature cards in their owner's library. Used by Alchemy
+    /// "most prevalent creature type in your library" seek filters.
+    MostPrevalentCreatureTypeInLibrary,
     /// Matches objects whose colors include the source object's chosen color.
     /// Used for "of the chosen color" patterns (Hall of Triumph, Runed Stalactite).
     /// Reads `ChosenAttribute::Color` from the source permanent.

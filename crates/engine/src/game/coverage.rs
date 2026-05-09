@@ -428,6 +428,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 parts.push(format!("{value}").to_lowercase());
             }
             FilterProp::IsChosenCreatureType => parts.push("chosen creature type".into()),
+            FilterProp::MostPrevalentCreatureTypeInLibrary => {
+                parts.push("most prevalent creature type in library".into());
+            }
             FilterProp::IsChosenCardType => parts.push("chosen card type".into()),
             FilterProp::IsChosenLandOrNonlandKind => parts.push("chosen land/nonland kind".into()),
             FilterProp::NotColor { color } => {
