@@ -3714,7 +3714,7 @@ fn parse_keyword_with_where_x(input: &str) -> Option<(Keyword, Option<QuantityRe
     let (rest, keyword_text) = nom::bytes::complete::take_till::<_, _, VE<'_>>(|c| c == ',')
         .parse(input)
         .ok()?;
-    let keyword = Keyword::from_str(keyword_text.trim()).ok()?;
+    let keyword = super::oracle_keyword::parse_keyword_from_oracle(keyword_text.trim())?;
     let rest = rest.trim();
     if rest.is_empty() {
         return Some((keyword, None));
@@ -3759,21 +3759,43 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
     let condition = scoped_tp.as_ref().map(|_| StaticCondition::DuringYourTurn);
     let tp = scoped_tp.as_ref().unwrap_or(tp);
 
-    // Pattern 1: "[type] spells you cast [from zone] have [keyword]."
-    // Find " have " to split subject from keyword
-    let have_pos = tp.lower.match_indices(" have ").next()?.0;
+    // Pattern 1: "[type] spell(s) you cast [from zone] have/has [keyword]."
+    // Find the predicate separator to split subject from keyword.
+    let (have_pos, have_len) = tp
+        .lower
+        .match_indices(" have ")
+        .next()
+        .map(|(pos, sep)| (pos, sep.len()))
+        .or_else(|| {
+            tp.lower
+                .match_indices(" has ")
+                .next()
+                .map(|(pos, sep)| (pos, sep.len()))
+        })?;
     let subject = &tp.lower[..have_pos];
-    let keyword_str = tp.lower[have_pos + " have ".len()..].trim();
+    let keyword_str = tp.lower[have_pos + have_len..].trim();
 
     // Parse the keyword — must be a valid keyword. A trailing "where X is …"
     // clause binds an earlier variable-X mana-value qualifier on the subject.
     let (keyword, where_x) = parse_keyword_with_where_x(keyword_str)?;
 
     // Find "spells you cast" in the subject — may be preceded by a type descriptor
-    let spells_marker = "spells you cast";
-    if let Some(marker_pos) = subject.find(spells_marker) {
-        let type_part = subject[..marker_pos].trim();
-        let after_spells = subject[marker_pos + spells_marker.len()..].trim();
+    let spell_marker = subject
+        .match_indices("spells you cast")
+        .next()
+        .map(|(pos, matched)| (pos, matched.len()))
+        .or_else(|| {
+            subject
+                .match_indices("spell you cast")
+                .next()
+                .map(|(pos, matched)| (pos, matched.len()))
+        });
+    if let Some((marker_pos, marker_len)) = spell_marker {
+        let raw_type_part = subject[..marker_pos].trim();
+        let type_part = tag::<_, _, VE<'_>>("each ")
+            .parse(raw_type_part)
+            .map_or(raw_type_part, |(rest, _)| rest.trim());
+        let after_spells = subject[marker_pos + marker_len..].trim();
 
         // Walk a cursor through optional qualifiers — zone first, then MV —
         // so combinations like "from exile with mana value 4 or greater" parse
@@ -3813,29 +3835,21 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
         });
         let _ = cursor; // qualifiers are optional; remaining slice is unused
 
-        // Build the affected filter
-        let mut typed = if type_part.is_empty() {
+        let base_filter = if type_part.is_empty() {
             // "Spells you cast" (no type prefix) — applies to all spells
-            TypedFilter::card()
+            TargetFilter::Typed(TypedFilter::card())
         } else {
             // Parse the spell type filter from the prefix
-            let type_prefix_original = &tp.original[..marker_pos].trim();
-            let (base_filter, _) = parse_type_phrase(type_prefix_original);
-            match base_filter {
-                TargetFilter::Typed(tf) => tf,
-                _ => TypedFilter::card(),
-            }
+            let type_prefix_original = tp.original[..marker_pos].trim();
+            let lower_prefix = type_prefix_original.to_lowercase();
+            let prefix_tp = TextPair::new(type_prefix_original, &lower_prefix);
+            let type_prefix_tp = nom_tag_tp(&prefix_tp, "each ").unwrap_or(prefix_tp);
+            parse_type_phrase(type_prefix_tp.original.trim()).0
         };
-        typed = typed.controller(ControllerRef::You);
-        if let Some(zone_prop) = zone_filter {
-            typed.properties.push(zone_prop);
-        }
-        if let Some(mv_prop) = mv_filter {
-            typed.properties.push(mv_prop);
-        }
+        let affected = apply_spell_keyword_subject_constraints(base_filter, zone_filter, mv_filter);
 
         let mut def = StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
-            .affected(TargetFilter::Typed(typed))
+            .affected(affected)
             .description(text.to_string());
         if let Some(condition) = condition.clone() {
             def = def.condition(condition);
@@ -3871,6 +3885,38 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
     }
 
     None
+}
+
+fn apply_spell_keyword_subject_constraints(
+    filter: TargetFilter,
+    zone_filter: Option<FilterProp>,
+    mv_filter: Option<FilterProp>,
+) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            typed = typed.controller(ControllerRef::You);
+            if let Some(prop) = zone_filter {
+                typed.properties.push(prop);
+            }
+            if let Some(prop) = mv_filter {
+                typed.properties.push(prop);
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| {
+                    apply_spell_keyword_subject_constraints(
+                        filter,
+                        zone_filter.clone(),
+                        mv_filter.clone(),
+                    )
+                })
+                .collect(),
+        },
+        other => other,
+    }
 }
 
 /// Parse creature subject phrases containing "of the chosen color/type" qualifiers.
@@ -14834,6 +14880,33 @@ mod tests {
                 );
             }
             other => panic!("Expected Some(Typed filter), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn static_each_instant_and_sorcery_spell_you_cast_has_casualty() {
+        let def =
+            parse_static_line("Each instant and sorcery spell you cast has casualty 1.").unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Casualty(1),
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Or { filters }) => {
+                assert!(
+                    filters.iter().all(|filter| matches!(
+                        filter,
+                        TargetFilter::Typed(tf)
+                            if tf.controller == Some(ControllerRef::You)
+                                && (tf.type_filters.contains(&TypeFilter::Instant)
+                                    || tf.type_filters.contains(&TypeFilter::Sorcery))
+                    )),
+                    "Expected instant/sorcery filters controlled by You, got {filters:?}"
+                );
+            }
+            other => panic!("Expected Some(Or instant/sorcery filter), got {other:?}"),
         }
     }
 

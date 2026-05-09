@@ -978,6 +978,56 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     may_trigger_origin: None,
                 }));
             }
+
+            let dynamically_granted_casualty_instances = state
+                .objects
+                .get(cast_obj_id)
+                .filter(|obj| obj.additional_cost.is_none())
+                .and_then(|obj| {
+                    let paid = state
+                        .stack
+                        .iter()
+                        .find(|entry| entry.id == *cast_obj_id)
+                        .is_some_and(|entry| {
+                            entry
+                                .ability()
+                                .is_some_and(|ability| ability.context.additional_cost_paid)
+                        });
+                    paid.then_some(obj.controller)
+                })
+                .map(|controller| {
+                    let n =
+                        super::casting::effective_spell_keywords(state, controller, *cast_obj_id)
+                            .iter()
+                            .filter(|keyword| matches!(keyword, Keyword::Casualty(_)))
+                            .count();
+                    (n, controller)
+                })
+                .unwrap_or((0, PlayerId(0)));
+            for _ in 0..dynamically_granted_casualty_instances.0 {
+                let casualty_ability = ResolvedAbility::new(
+                    Effect::CopySpell {
+                        target: TargetFilter::SelfRef,
+                    },
+                    Vec::new(),
+                    *cast_obj_id,
+                    dynamically_granted_casualty_instances.1,
+                );
+                let timestamp = state.next_timestamp() as u32;
+                pending.push(PendingTriggerContext::single(PendingTrigger {
+                    source_id: *cast_obj_id,
+                    controller: dynamically_granted_casualty_instances.1,
+                    condition: Some(TriggerCondition::WasCast),
+                    ability: casualty_ability,
+                    timestamp,
+                    target_constraints: Vec::new(),
+                    trigger_event: Some(event.clone()),
+                    modal: None,
+                    mode_abilities: vec![],
+                    description: Some("Casualty".to_string()),
+                    may_trigger_origin: None,
+                }));
+            }
         }
 
         // CR 725.2: At the beginning of the monarch's end step, that player draws a card.
@@ -7882,6 +7932,85 @@ pub mod tests {
             Some(cast_spell),
             None,
         ));
+    }
+
+    #[test]
+    fn granted_casualty_triggers_copy_when_paid() {
+        let mut state = setup();
+        let caster = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Silverquill Source".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Casualty(1),
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Instant).controller(ControllerRef::You),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Test Instant".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.cast_from_zone = Some(Zone::Hand);
+        }
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            spell,
+            caster,
+        );
+        ability.context.additional_cost_paid = true;
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: caster,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(2),
+                ability: Some(ability),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                object_id: spell,
+                controller: caster,
+                card_id: CardId(2),
+            }],
+        );
+
+        assert!(
+            state.stack.iter().any(|entry| {
+                matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility { ability, .. }
+                        if matches!(ability.effect, Effect::CopySpell { target: TargetFilter::SelfRef })
+                )
+            }),
+            "paid granted casualty should create a copy trigger"
+        );
     }
 
     #[test]

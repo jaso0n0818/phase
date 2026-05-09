@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use crate::types::ability::{
     AbilityCost, AdditionalCost, CastTimingPermission, CostPaidObjectSnapshot, Effect,
-    KickerVariant, ResolvedAbility, SpellCastingOptionKind,
+    KickerVariant, QuantityExpr, ResolvedAbility, SpellCastingOptionKind, TargetFilter,
+    TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -957,7 +958,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     let additional = state
         .objects
         .get(&object_id)
-        .and_then(|obj| obj.additional_cost.clone());
+        .and_then(|obj| obj.additional_cost.clone())
+        .or_else(|| effective_casualty_additional_cost(state, player, object_id));
 
     // CR 118.9 + CR 601.2b/f/h: Oracle text alternative costs are announced
     // before total cost determination and paid rather than the spell's mana
@@ -1607,6 +1609,29 @@ fn pay_additional_cost(
     }
 
     finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+fn effective_casualty_additional_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<AdditionalCost> {
+    let threshold = super::casting::effective_spell_keywords(state, player, object_id)
+        .into_iter()
+        .find_map(|keyword| match keyword {
+            Keyword::Casualty(n) => Some(n),
+            _ => None,
+        })?;
+    Some(AdditionalCost::Optional(AbilityCost::Sacrifice {
+        target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            crate::types::ability::FilterProp::PowerGE {
+                value: QuantityExpr::Fixed {
+                    value: threshold as i32,
+                },
+            },
+        ])),
+        count: 1,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3193,11 +3218,13 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr,
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp,
+        QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
+    use crate::types::statics::StaticMode;
 
     fn make_pending(source_id: ObjectId) -> PendingCast {
         PendingCast {
@@ -3300,6 +3327,103 @@ mod tests {
             next_kicker_option(&state, PlayerId(0), &pending).expect("repeatable kicker option");
         assert_eq!(variant, KickerVariant::First);
         assert!(repeatable);
+    }
+
+    #[test]
+    fn granted_casualty_additional_cost_prompts_for_matching_spell() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Silverquill Source".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = crate::types::ability::StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Casualty(1),
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Instant).controller(ControllerRef::You),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Test Instant".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let sacrifice = create_object(
+            &mut state,
+            CardId(3),
+            caster,
+            "Power One Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&sacrifice).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+        }
+
+        let mut events = Vec::new();
+        let waiting = check_additional_cost_or_pay_with_distribute(
+            &mut state,
+            caster,
+            spell,
+            CardId(2),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                spell,
+                caster,
+            ),
+            &ManaCost::NoCost,
+            CastingVariant::Normal,
+            None,
+            None,
+            Zone::Hand,
+            &mut events,
+        )
+        .expect("granted casualty should be castable");
+
+        match waiting {
+            WaitingFor::OptionalCostChoice { cost, .. } => match cost {
+                AdditionalCost::Optional(AbilityCost::Sacrifice { target, count }) => {
+                    assert_eq!(count, 1);
+                    match target {
+                        TargetFilter::Typed(tf) => {
+                            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                            assert!(tf.properties.contains(&FilterProp::PowerGE {
+                                value: QuantityExpr::Fixed { value: 1 },
+                            }));
+                        }
+                        other => panic!("expected typed casualty sacrifice filter, got {other:?}"),
+                    }
+                }
+                other => panic!("expected optional casualty sacrifice cost, got {other:?}"),
+            },
+            other => panic!("expected OptionalCostChoice, got {other:?}"),
+        }
     }
 
     fn create_starting_town(state: &mut GameState, card_id: CardId) -> ObjectId {
