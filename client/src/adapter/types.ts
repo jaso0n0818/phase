@@ -393,6 +393,16 @@ export type SearchSelectionConstraint =
 
 // ── Game Object ──────────────────────────────────────────────────────────
 
+/**
+ * Per-permanent phasing status (mirrors Rust `PhaseStatus`).
+ * Serde output: `{ "status": "PhasedIn" }` / `{ "status": "PhasedOut", "cause": "Directly" | "Indirectly" }`.
+ * CR 702.26: phased-out permanents stay on the battlefield but are treated
+ * as though they don't exist for almost all rules queries (CR 702.26d).
+ */
+export type PhaseStatus =
+  | { status: "PhasedIn" }
+  | { status: "PhasedOut"; cause: "Directly" | "Indirectly" };
+
 export interface GameObject {
   id: ObjectId;
   card_id: CardId;
@@ -445,6 +455,13 @@ export interface GameObject {
    * Independent of `is_token` (which is the CR 111.1 game-rules concept).
    */
   display_source?: "Card" | "Token";
+  /**
+   * CR 702.26: Phasing status of this permanent. Absent for objects in zones
+   * where phasing doesn't apply (engine-side default is `PhasedIn`, which may
+   * be elided on the wire if the field defaults). The FE renders a sky-blue
+   * "ethereal plane" tint over phased-out permanents.
+   */
+  phase_status?: PhaseStatus;
   is_commander?: boolean;
   commander_tax?: number;
   /**

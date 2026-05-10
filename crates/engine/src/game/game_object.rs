@@ -1073,6 +1073,31 @@ mod tests {
         assert_eq!(deserialized.id, ObjectId(1));
     }
 
+    /// CR 702.26: `phase_status` must be exposed on the wire so the FE can
+    /// render a phased-out tint on individual permanents. The serde shape is
+    /// the tagged enum `{ "status": "PhasedOut", "cause": "Directly" }` which
+    /// the TS `PhaseStatus` type mirrors in `client/src/adapter/types.ts`.
+    #[test]
+    fn phase_status_roundtrips_via_wire_format() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Test Card".to_string(),
+            Zone::Battlefield,
+        );
+        obj.phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+
+        let json = serde_json::to_value(&obj).unwrap();
+        assert_eq!(json["phase_status"]["status"], "PhasedOut");
+        assert_eq!(json["phase_status"]["cause"], "Directly");
+
+        let deserialized: GameObject = serde_json::from_value(json).unwrap();
+        assert!(deserialized.is_phased_out());
+    }
+
     #[test]
     fn chosen_color_returns_stored_color() {
         let mut obj = GameObject::new(
