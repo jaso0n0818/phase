@@ -2027,6 +2027,23 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                 ));
             }
         }
+        // CR 401.5 + CR 305.1: Land on top of library playable via
+        // `TopOfLibraryCastPermission { play_mode: Play }` (Future Sight,
+        // Bolas's Citadel, Magus of the Future).
+        if let Some((top_id, _source)) =
+            casting::top_of_library_land_playable_by_permission(state, player)
+        {
+            if let Some(obj) = state.objects.get(&top_id) {
+                actions.push(candidate(
+                    GameAction::PlayLand {
+                        object_id: top_id,
+                        card_id: obj.card_id,
+                    },
+                    TacticalClass::Land,
+                    Some(player),
+                ));
+            }
+        }
     }
 
     // CR 702.61a: Spells and non-mana activated abilities are suppressed by split second.

@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from "react";
 
-import type { GameAction, GameObject, ObjectId } from "../../adapter/types.ts";
+import type { GameAction, GameObject } from "../../adapter/types.ts";
 import { CardImage } from "../card/CardImage.tsx";
 import { ModalPanelShell } from "../ui/ModalPanelShell.tsx";
 import { ScrollableCardStrip } from "../modal/ChoiceOverlay.tsx";
@@ -11,7 +11,7 @@ import { useUiStore } from "../../stores/uiStore.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { getPlayerZoneIds, getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
-import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
+import { playOrCastActionsForObject } from "../../viewmodel/cardActionChoice.ts";
 import { abilityChoiceLabel } from "../../viewmodel/costLabel.ts";
 
 interface ZoneViewerProps {
@@ -24,25 +24,6 @@ const ZONE_TITLES: Record<string, string> = {
   graveyard: "Graveyard",
   exile: "Exile",
 };
-
-/**
- * Filter `legalActionsByObject` entries for a zone-viewable card to the
- * cast actions only. Engine authority — covers Adventure, Foretell, Plot,
- * Suspend, Warp, and any future exile-cast permission without per-mechanic
- * client-side branches.
- */
-function castActionsForObject(
-  legalActionsByObject: Record<string, GameAction[]> | undefined,
-  objectId: ObjectId,
-): GameAction[] {
-  return collectObjectActions(legalActionsByObject, objectId).filter((a) =>
-    a.type === "CastSpell"
-    || a.type === "CastSpellAsSneak"
-    || a.type === "CastSpellAsWebSlinging"
-    || a.type === "CastSpellAsMiracle"
-    || a.type === "CastSpellAsMadness"
-  );
-}
 
 export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -99,7 +80,7 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
               // Warp, etc.). The zone viewer surfaces whatever the engine
               // reports — no per-mechanic permission inspection.
               const castActions = zone === "exile" && isMyZone && hasPriority
-                ? castActionsForObject(legalActionsByObject, obj.id)
+                ? playOrCastActionsForObject(legalActionsByObject, obj.id)
                 : [];
               const isValidTarget = currentLegalTargets.has(obj.id);
               return (

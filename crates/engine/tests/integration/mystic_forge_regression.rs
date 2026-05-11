@@ -150,7 +150,7 @@ fn no_static_means_top_of_library_not_castable() {
 
 /// Sibling-cluster regression: Future Sight's broader "You may play lands and
 /// cast spells from the top of your library" must also surface non-land cards
-/// for casting.
+/// for casting (via `legal_actions`, not just the permission helper).
 #[test]
 fn future_sight_surfaces_non_land_top_of_library() {
     let Some(db) = load_db() else {
@@ -160,19 +160,90 @@ fn future_sight_surfaces_non_land_top_of_library() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let _fs_id = scenario.add_real_card(P0, "Future Sight", Zone::Battlefield, db);
-    // Any non-land card on top — Lightning Bolt is the canonical instant.
+    // Lightning Bolt is the canonical {R} instant.
     let top_id = scenario.add_real_card(P0, "Lightning Bolt", Zone::Library, db);
     let mut runner = scenario.build();
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
 
     move_to_top_of_library(runner.state_mut(), top_id, P0);
+    add_mana(&mut runner, &[ManaType::Red]);
 
-    let available = engine::game::casting::spell_objects_available_to_cast(runner.state(), P0);
+    // Full pipeline: legal_actions must include a CastSpell whose object_id
+    // is the library top when Future Sight's `play_mode: Play` permission is
+    // active and mana is available.
+    let legal = engine::ai_support::legal_actions(runner.state());
+    let has_cast = legal.iter().any(|a| {
+        matches!(
+            a,
+            GameAction::CastSpell { object_id, .. } if *object_id == top_id
+        )
+    });
     assert!(
-        available.contains(&top_id),
-        "Future Sight must surface a non-land card on top of library; \
-         available={:?}, top_id={:?}",
-        available,
-        top_id,
+        has_cast,
+        "Future Sight must surface CastSpell for a non-land top of library; \
+         legal_actions={:?}",
+        legal,
+    );
+}
+
+/// Issue #297 sibling case: Future Sight's "You may **play lands** and cast
+/// spells from the top of your library" must surface `PlayLand` for a land
+/// on top of library. The engine needs (a) a permission helper that includes
+/// lands (`top_of_library_land_playable_by_permission`), (b) emission of a
+/// `PlayLand` candidate in `legal_actions`, and (c) `handle_play_land` to
+/// accept library-zone objects with permission.
+#[test]
+fn future_sight_surfaces_land_on_top_of_library() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let _fs_id = scenario.add_real_card(P0, "Future Sight", Zone::Battlefield, db);
+    // Basic Forest — guaranteed Land typed card.
+    let top_id = scenario.add_real_card(P0, "Forest", Zone::Library, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    move_to_top_of_library(runner.state_mut(), top_id, P0);
+
+    // CR 401.5 + CR 305.1: legal_actions must include a PlayLand for the
+    // library top under Future Sight's play permission.
+    let legal = engine::ai_support::legal_actions(runner.state());
+    let has_play_land = legal.iter().any(|a| {
+        matches!(
+            a,
+            GameAction::PlayLand { object_id, .. } if *object_id == top_id
+        )
+    });
+    assert!(
+        has_play_land,
+        "Future Sight must surface PlayLand for a land on top of library; \
+         legal_actions={:?}",
+        legal,
+    );
+
+    // End-to-end: actually playing the land must move it to the battlefield.
+    let card_id = runner.state().objects[&top_id].card_id;
+    let result = runner
+        .act(engine::types::actions::GameAction::PlayLand {
+            object_id: top_id,
+            card_id,
+        })
+        .expect("PlayLand for library top should succeed under Future Sight");
+    // After a land play, the active player retains priority.
+    assert!(matches!(
+        result.waiting_for,
+        engine::types::game_state::WaitingFor::Priority { .. }
+    ));
+    assert_eq!(
+        runner.state().objects[&top_id].zone,
+        Zone::Battlefield,
+        "Library top land must enter the battlefield after PlayLand"
+    );
+    assert!(
+        !runner.state().players[0].library.contains(&top_id),
+        "Library top must have left the library"
     );
 }

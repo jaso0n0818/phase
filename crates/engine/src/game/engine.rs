@@ -3424,7 +3424,9 @@ fn handle_play_land(
         ));
     }
 
-    // Validate that object_id exists in hand or graveyard (with permission) and matches card_id
+    // Validate that object_id exists in hand or graveyard (with permission)
+    // or on top of library (with TopOfLibraryCastPermission { play_mode: Play })
+    // and matches card_id.
     let player_data = state
         .players
         .iter()
@@ -3443,9 +3445,18 @@ fn handle_play_land(
     };
     let in_graveyard_with_permission = gy_permission_source.is_some();
 
-    if !in_hand && !in_graveyard_with_permission {
+    // CR 401.5 + CR 305.1: Check top of library for
+    // `TopOfLibraryCastPermission { play_mode: Play }` (Future Sight,
+    // Bolas's Citadel, Magus of the Future). The helper already gates on
+    // "front of library + play-mode permission + filter match + is a land,"
+    // so we only need to confirm it points at the caller's object_id.
+    let in_library_with_permission =
+        super::casting::top_of_library_land_playable_by_permission(state, player)
+            .is_some_and(|(top_id, _)| top_id == object_id);
+
+    if !in_hand && !in_graveyard_with_permission && !in_library_with_permission {
         return Err(EngineError::InvalidAction(
-            "Card not found in hand or graveyard with play permission".to_string(),
+            "Card not found in hand, graveyard, or library with play permission".to_string(),
         ));
     }
     if !state
@@ -3532,7 +3543,14 @@ fn handle_play_land(
     }
 
     // Determine origin zone for the zone change event
-    let origin_zone = if in_hand { Zone::Hand } else { Zone::Graveyard };
+    let origin_zone = if in_hand {
+        Zone::Hand
+    } else if in_graveyard_with_permission {
+        Zone::Graveyard
+    } else {
+        // CR 401.5: in_library_with_permission — the card moves Library → Battlefield.
+        Zone::Library
+    };
 
     // Route through the replacement pipeline (handles ETB replacements like shock lands)
     let mut proposed = crate::types::proposed_event::ProposedEvent::zone_change(

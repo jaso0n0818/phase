@@ -322,7 +322,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         top_of_library_permission_source(state, player, Some(CardPlayMode::Cast))
     {
         // Only non-land cards reach the cast path; lands flow through the
-        // play-land action (`top_of_library_lands_playable_by_permission`).
+        // play-land action (`top_of_library_land_playable_by_permission`).
         if state.objects.get(&top_id).is_some_and(|o| {
             !o.card_types
                 .core_types
@@ -1019,6 +1019,34 @@ pub(crate) fn top_of_library_permission_source(
             None
         }
     })
+}
+
+/// CR 401.5 + CR 305.1: Return the top-of-library land + source pair when a
+/// battlefield static grants `TopOfLibraryCastPermission { play_mode: Play }`
+/// and the top card is a land that matches the static's `affected` filter.
+///
+/// Future Sight, Bolas's Citadel, and Magus of the Future all carry the wider
+/// `play_mode: Play` permission and so reach this path; Mystic Forge /
+/// Realmwalker (cast-only) do not. CR 305.1 — lands are "played," not "cast,"
+/// so the engine emits `GameAction::PlayLand` for the library top via this
+/// helper rather than routing through the cast pipeline.
+pub fn top_of_library_land_playable_by_permission(
+    state: &GameState,
+    player: PlayerId,
+) -> Option<(ObjectId, ObjectId)> {
+    let (top_id, src_id, _alt) =
+        top_of_library_permission_source(state, player, Some(CardPlayMode::Play))?;
+    let obj = state.objects.get(&top_id)?;
+    // CR 305.1: Only lands reach this path; non-land cards under the same
+    // permission flow through `spell_objects_available_to_cast`.
+    if !obj
+        .card_types
+        .core_types
+        .contains(&crate::types::card_type::CoreType::Land)
+    {
+        return None;
+    }
+    Some((top_id, src_id))
 }
 
 /// CR 604.2 + CR 305.1: Find lands in the player's graveyard that can be played

@@ -1,13 +1,13 @@
 import { useCallback, useMemo } from "react";
 
-import type { GameAction, ObjectId } from "../../adapter/types.ts";
+import type { ObjectId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
+import { playOrCastActionsForObject } from "../../viewmodel/cardActionChoice.ts";
 
 interface LibraryPileProps {
   playerId: number;
@@ -32,27 +32,6 @@ function TopCard({ cardName }: { cardName: string }) {
       className="h-full w-full rounded-lg object-cover"
       draggable={false}
     />
-  );
-}
-
-/**
- * CR 401.5 + CR 118.9 + CR 601.2a: Filter `legalActionsByObject` entries for
- * the top-of-library card to the cast actions only. Mirrors `ZoneViewer`'s
- * exile-zone surfacing — Mystic Forge, Future Sight, Bolas's Citadel, Magus
- * of the Future, Realmwalker, etc. all surface a `CastSpell`-family action
- * for the library top through `spell_objects_available_to_cast`. The pile
- * displays whatever the engine reports; no per-mechanic permission inspection.
- */
-function castActionsForObject(
-  legalActionsByObject: Record<string, GameAction[]> | undefined,
-  objectId: ObjectId,
-): GameAction[] {
-  return collectObjectActions(legalActionsByObject, objectId).filter((a) =>
-    a.type === "CastSpell"
-    || a.type === "CastSpellAsSneak"
-    || a.type === "CastSpellAsWebSlinging"
-    || a.type === "CastSpellAsMiracle"
-    || a.type === "CastSpellAsMadness"
   );
 }
 
@@ -95,27 +74,30 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
   const isMyLibrary = playerId === myId;
   const hasPriority = waitingFor?.type === "Priority" && canActForWaitingState;
 
-  // CR 401.5 + CR 118.9: cast-action surfacing is engine-authoritative —
-  // the entry exists in `legalActionsByObject` only when the engine has
-  // already validated the TopOfLibraryCastPermission filter, mana, and
-  // timing. The frontend renders the reported actions, never computes them.
-  const castActions = useMemo(() => {
+  // CR 401.5 + CR 118.9 + CR 305.9: cast/play-action surfacing is engine-
+  // authoritative — the entry exists in `legalActionsByObject` only when the
+  // engine has already validated the TopOfLibraryCastPermission filter, mana,
+  // timing, and (for `PlayLand`) the land-drop slot. The frontend renders
+  // the reported actions, never computes them. Future Sight / Bolas's
+  // Citadel / Magus of the Future surface `PlayLand` here; Mystic Forge /
+  // Realmwalker surface the `CastSpell` family.
+  const playActions = useMemo(() => {
     if (!isMyLibrary || !hasPriority || topObjectId == null) return [];
-    return castActionsForObject(legalActionsByObject, topObjectId);
+    return playOrCastActionsForObject(legalActionsByObject, topObjectId);
   }, [isMyLibrary, hasPriority, topObjectId, legalActionsByObject]);
 
-  const canCast = castActions.length > 0;
+  const canPlay = playActions.length > 0;
 
-  const handleCast = useCallback(() => {
-    if (castActions.length === 0 || topObjectId == null) return;
-    if (castActions.length === 1) {
-      void dispatchAction(castActions[0]);
+  const handlePlay = useCallback(() => {
+    if (playActions.length === 0 || topObjectId == null) return;
+    if (playActions.length === 1) {
+      void dispatchAction(playActions[0]);
     } else {
-      // Multiple cast options (e.g., cast normal + alt-cost) — defer to the
-      // shared ability-choice modal so the player can pick.
-      setPendingAbilityChoice({ objectId: topObjectId as ObjectId, actions: castActions });
+      // Multiple options (e.g., cast normal + alt-cost) — defer to the shared
+      // ability-choice modal so the player can pick.
+      setPendingAbilityChoice({ objectId: topObjectId as ObjectId, actions: playActions });
     }
-  }, [castActions, topObjectId, dispatchAction, setPendingAbilityChoice]);
+  }, [playActions, topObjectId, dispatchAction, setPendingAbilityChoice]);
 
   if (count === 0) return null;
 
@@ -128,8 +110,8 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
     <div
       className="relative"
       title={
-        canCast
-          ? `Cast ${topCardName ?? "top of library"} from top of library`
+        canPlay
+          ? `Play ${topCardName ?? "top of library"} from top of library`
           : `Library (${count})`
       }
       data-library-pile={playerId}
@@ -152,11 +134,16 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
       {/* Top card */}
       <button
         type="button"
-        onClick={canCast ? handleCast : undefined}
-        disabled={!canCast}
-        data-library-top-cast={canCast ? "true" : "false"}
+        onClick={canPlay ? handlePlay : undefined}
+        disabled={!canPlay}
+        aria-label={
+          canPlay
+            ? `Play ${topCardName ?? "top of library"} from top of library`
+            : `Library (${count} cards)`
+        }
+        data-library-top-cast={canPlay ? "true" : "false"}
         className={`relative block h-full w-full overflow-hidden rounded-lg border shadow-md ${
-          canCast
+          canPlay
             ? "border-amber-400 ring-2 ring-amber-400/70 shadow-[0_0_12px_3px_rgba(245,158,11,0.5)] cursor-pointer"
             : isRevealed
               ? "border-amber-500 cursor-default"

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameAction, GameObject, GameState } from "../../../adapter/types.ts";
@@ -55,14 +55,16 @@ function makeObject(id: number, name: string): GameObject {
 
 function setStore({
   topCardId = 42,
+  topCardName = "Sol Ring",
   canPeek,
-  hasCastAction,
+  actions,
 }: {
   topCardId?: number;
+  topCardName?: string;
   canPeek: boolean;
-  hasCastAction: boolean;
+  actions: GameAction[];
 }) {
-  const top = makeObject(topCardId, "Sol Ring");
+  const top = makeObject(topCardId, topCardName);
   const gameState = {
     active_player: 0,
     objects: { [topCardId]: top },
@@ -102,16 +104,11 @@ function setStore({
     waiting_for: { type: "Priority", data: { player: 0 } },
   } as unknown as GameState;
 
-  const castAction: GameAction = {
-    type: "CastSpell",
-    data: { object_id: topCardId, card_id: topCardId, targets: [] },
-  } as unknown as GameAction;
-
   useGameStore.setState({
     gameState,
     waitingFor: gameState.waiting_for,
-    legalActions: hasCastAction ? [castAction] : [],
-    legalActionsByObject: hasCastAction ? { [String(topCardId)]: [castAction] } : {},
+    legalActions: actions,
+    legalActionsByObject: actions.length > 0 ? { [String(topCardId)]: actions } : {},
     spellCosts: {},
     gameMode: "ai",
   });
@@ -120,7 +117,21 @@ function setStore({
   });
 }
 
-describe("LibraryPile cast surfacing", () => {
+function castAction(objectId: number): GameAction {
+  return {
+    type: "CastSpell",
+    data: { object_id: objectId, card_id: objectId, targets: [] },
+  } as unknown as GameAction;
+}
+
+function playLandAction(objectId: number): GameAction {
+  return {
+    type: "PlayLand",
+    data: { object_id: objectId, card_id: objectId },
+  } as unknown as GameAction;
+}
+
+describe("LibraryPile play/cast surfacing (#297)", () => {
   beforeEach(() => {
     dispatchMock.mockClear();
   });
@@ -129,17 +140,11 @@ describe("LibraryPile cast surfacing", () => {
     cleanup();
   });
 
-  /// Issue #297: Mystic Forge on the battlefield grants
-  /// can_look_at_top_of_library + a CastSpell action keyed on the top object.
-  /// The library pile must surface the cast button as clickable.
-  it("dispatches the CastSpell action when the top card is castable", () => {
-    setStore({ canPeek: true, hasCastAction: true });
-    const { container } = render(<LibraryPile playerId={0} />);
-    const button = container.querySelector(
-      '[data-library-top-cast="true"]',
-    ) as HTMLButtonElement;
-    expect(button).not.toBeNull();
-    expect(button.disabled).toBe(false);
+  it("dispatches the CastSpell action when the top card is castable (Mystic Forge)", () => {
+    setStore({ canPeek: true, actions: [castAction(42)] });
+    render(<LibraryPile playerId={0} />);
+    const button = screen.getByRole("button", { name: /play sol ring from top of library/i });
+    expect(button).not.toBeDisabled();
     fireEvent.click(button);
     expect(dispatchMock).toHaveBeenCalledTimes(1);
     expect(dispatchMock).toHaveBeenCalledWith(
@@ -147,29 +152,51 @@ describe("LibraryPile cast surfacing", () => {
     );
   });
 
-  /// Negative: without a CastSpell legal action, the pile must not surface a
-  /// cast button — clicking the pile is a no-op.
-  it("does not dispatch when there is no cast action", () => {
-    setStore({ canPeek: true, hasCastAction: false });
-    const { container } = render(<LibraryPile playerId={0} />);
-    const button = container.querySelector(
-      '[data-library-top-cast="false"]',
-    ) as HTMLButtonElement;
-    expect(button).not.toBeNull();
-    expect(button.disabled).toBe(true);
+  it("dispatches the PlayLand action when the top card is a playable land (Future Sight)", () => {
+    setStore({
+      topCardName: "Forest",
+      canPeek: true,
+      actions: [playLandAction(42)],
+    });
+    render(<LibraryPile playerId={0} />);
+    const button = screen.getByRole("button", { name: /play forest from top of library/i });
+    expect(button).not.toBeDisabled();
+    fireEvent.click(button);
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(dispatchMock).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "PlayLand" }),
+    );
   });
 
-  /// Without can_look_at_top_of_library, the card image stays hidden but the
-  /// cast action surfacing remains engine-authoritative — when the engine
-  /// reports a legal CastSpell, the button must still be enabled (the engine
-  /// is the sole source of truth for castability).
-  it("surfaces cast action even without peek when the engine reports one", () => {
-    setStore({ canPeek: false, hasCastAction: true });
-    const { container } = render(<LibraryPile playerId={0} />);
-    const button = container.querySelector(
-      '[data-library-top-cast="true"]',
-    ) as HTMLButtonElement;
-    expect(button).not.toBeNull();
-    expect(button.disabled).toBe(false);
+  it("routes multi-action top cards to the ability-choice modal", () => {
+    // E.g. Bolas's Citadel: cast normally + cast via PayLife alt-cost would
+    // both appear when both options are legal at once.
+    const actions = [castAction(42), castAction(42)];
+    setStore({ canPeek: true, actions });
+    render(<LibraryPile playerId={0} />);
+    fireEvent.click(screen.getByRole("button", { name: /play sol ring from top of library/i }));
+    // Multi-action path delegates to the shared ability-choice modal — no
+    // direct dispatch.
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(useUiStore.getState().pendingAbilityChoice).toEqual({
+      objectId: 42,
+      actions,
+    });
+  });
+
+  it("does not dispatch when there is no play action", () => {
+    setStore({ canPeek: true, actions: [] });
+    render(<LibraryPile playerId={0} />);
+    const button = screen.getByRole("button", { name: /library \(1 cards\)/i });
+    expect(button).toBeDisabled();
+  });
+
+  it("surfaces engine-reported play action even without peek (engine is authoritative)", () => {
+    setStore({ canPeek: false, actions: [castAction(42)] });
+    render(<LibraryPile playerId={0} />);
+    // Without peek the top name is hidden, so aria-label falls back to the
+    // generic "from top of library" phrasing.
+    const button = screen.getByRole("button", { name: /play top of library from top of library/i });
+    expect(button).not.toBeDisabled();
   });
 });
