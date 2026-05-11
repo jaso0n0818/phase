@@ -6844,6 +6844,114 @@ pub mod tests {
     }
 
     #[test]
+    fn fertile_ground_cross_controller_routes_mana_to_lands_controller() {
+        // CR 109.5 + CR 605.1b regression: when P1 controls Fertile Ground
+        // attached to P0's Forest, tapping that Forest for mana must route
+        // the bonus mana to P0 (the land's controller / "its controller"),
+        // not to P1 (the aura's controller). Bug reported in the wild: AI
+        // (P1) gifted a Fertile Ground onto the human's (P0) land; the
+        // human tapped the land and got no extra mana because the resolver
+        // defaulted to ability.controller. Fix: parser sets
+        // `player_scope: TriggeringPlayer` on the executed mana ability so
+        // resolver rebinds the controller to the ManaAdded event's player_id.
+        use crate::types::ability::{ManaContribution, ManaProduction, PlayerFilter, QuantityExpr};
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // P0 controls a Forest.
+        let forest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&forest)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        // P1 controls a Fertile Ground attached to P0's Forest.
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Fertile Ground".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.attached_to = Some(forest.into());
+            obj.entered_battlefield_turn = Some(1);
+            // Mirror the parser-emitted shape: player_scope on the executed
+            // mana ability rebinds resolution controller to TriggeringPlayer.
+            let execute = AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        color_options: vec![
+                            ManaColor::White,
+                            ManaColor::Blue,
+                            ManaColor::Black,
+                            ManaColor::Red,
+                            ManaColor::Green,
+                        ],
+                        contribution: ManaContribution::Additional,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .player_scope(PlayerFilter::TriggeringPlayer);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(execute)
+                    .valid_card(TargetFilter::AttachedTo),
+            );
+        }
+
+        // P0 taps their Forest for mana.
+        let events = vec![GameEvent::ManaAdded {
+            player_id: PlayerId(0),
+            mana_type: crate::types::mana::ManaType::Green,
+            source_id: forest,
+            tapped_for_mana: true,
+        }];
+
+        process_triggers(&mut state, &events);
+
+        assert_eq!(state.stack.len(), 0, "Mana trigger must resolve inline");
+        let p0_pool = state
+            .players
+            .iter()
+            .find(|p| p.id == PlayerId(0))
+            .map(|p| p.mana_pool.total())
+            .unwrap_or(0);
+        let p1_pool = state
+            .players
+            .iter()
+            .find(|p| p.id == PlayerId(1))
+            .map(|p| p.mana_pool.total())
+            .unwrap_or(0);
+        assert_eq!(
+            p0_pool, 1,
+            "Bonus mana must go to the land's controller (P0), not the aura's controller (P1)"
+        );
+        assert_eq!(
+            p1_pool, 0,
+            "Aura's controller (P1) must not gain mana from P0 tapping P0's land"
+        );
+    }
+
+    #[test]
     fn utopia_sprawl_triggered_mana_ability_resolves_chosen_color_inline() {
         // CR 603.6d + CR 605.1b: Utopia Sprawl's "As this Aura enters, choose a color"
         // replacement stores a ChosenAttribute::Color on the aura; tapping the

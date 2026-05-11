@@ -4,6 +4,7 @@ use engine::types::ability::{
 };
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use super::context::PolicyContext;
@@ -362,7 +363,44 @@ pub(crate) fn aura_polarity(source: &GameObject) -> EffectPolarity {
         }
     }
 
+    // CR 109.5 + CR 605.1b: Some Auras carry their benefit on a triggered
+    // ability that routes the effect to the enchanted permanent's controller
+    // ("its controller adds an additional one mana of any color" — Fertile
+    // Ground, Wild Growth, Utopia Sprawl, Verdant Haven, Trace of Abundance,
+    // Market Festival, Weirding Wood, Overgrowth). Without inspecting
+    // triggers, these auras appear `Contextual` and the AI cannot tell that
+    // gifting one to an opponent is a strict negative for itself. A
+    // `TapsForMana` trigger that adds mana is unambiguously beneficial to
+    // the host's controller.
+    for trigger in source.trigger_definitions.iter_unchecked() {
+        match trigger_mode_polarity_for_host(trigger) {
+            EffectPolarity::Contextual => continue,
+            polarity => return polarity,
+        }
+    }
+
     EffectPolarity::Contextual
+}
+
+/// Classify a trigger on an Aura as beneficial/harmful to the *enchanted
+/// permanent's controller* (the host's controller — not the aura's controller).
+/// Used by `aura_polarity` to flag auras whose value accrues to the host owner
+/// (e.g. mana-doubling auras: Fertile Ground class) so the AI prefers attaching
+/// them to its own permanents and avoids gifting them to opponents.
+fn trigger_mode_polarity_for_host(
+    trigger: &engine::types::ability::TriggerDefinition,
+) -> EffectPolarity {
+    let Some(execute) = trigger.execute.as_deref() else {
+        return EffectPolarity::Contextual;
+    };
+    match trigger.mode {
+        // "Whenever enchanted land is tapped for mana, its controller adds …"
+        // — bonus mana goes to the host's controller.
+        TriggerMode::TapsForMana if matches!(&*execute.effect, Effect::Mana { .. }) => {
+            EffectPolarity::Beneficial
+        }
+        _ => EffectPolarity::Contextual,
+    }
 }
 
 /// Classify a static mode as beneficial/harmful to the enchanted permanent.

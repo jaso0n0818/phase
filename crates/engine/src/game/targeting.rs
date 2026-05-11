@@ -558,6 +558,14 @@ pub(crate) fn extract_player_from_event(
     use crate::types::events::GameEvent;
     match event {
         GameEvent::LifeChanged { player_id, .. } => Some(*player_id),
+        // CR 106.4 + CR 605.1b: `ManaAdded` carries the player whose pool gained
+        // the mana — equivalently, the player who tapped the source for mana.
+        // For TapsForMana triggers (Fertile Ground / Wild Growth / Utopia Sprawl
+        // and the wider "its controller adds…" Aura class), this is the
+        // enchanted land's controller, which `PlayerFilter::TriggeringPlayer`
+        // rebinds as the resolving ability's controller so the bonus mana
+        // routes to the tapper even when the Aura is opponent-controlled.
+        GameEvent::ManaAdded { player_id, .. } => Some(*player_id),
         GameEvent::CardsDrawn { player_id, .. } => Some(*player_id),
         GameEvent::CardDrawn { player_id, .. } => Some(*player_id),
         GameEvent::Discarded { player_id, .. } => Some(*player_id),

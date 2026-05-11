@@ -76,12 +76,23 @@ fn self_recursion_trigger_zone(ability: &crate::types::ability::AbilityDefinitio
 }
 
 fn effect_adds_mana_to_triggering_player(effect_lower: &str) -> bool {
+    // CR 109.5 + CR 117.3a: "its controller" binds to the antecedent of the
+    // trigger condition (e.g. "enchanted land" → the land's controller).
+    // For TapsForMana triggers on Auras (Fertile Ground, Wild Growth, Utopia
+    // Sprawl, Trace of Abundance, Verdant Haven, Market Festival, Weirding
+    // Wood, Overgrowth), the antecedent is the enchanted permanent and its
+    // controller equals the player who tapped it for mana — i.e. the
+    // ManaAdded event's `player_id`, which `PlayerFilter::TriggeringPlayer`
+    // extracts. Routing these effects through `TriggeringPlayer` keeps the
+    // mana with the land's controller even when an opponent's Aura is
+    // attached.
     value(
         (),
         pair(
             alt((
                 tag::<_, _, OracleError<'_>>("that player "),
                 tag("that opponent "),
+                tag("its controller "),
             )),
             alt((tag("adds "), tag("add "))),
         ),
@@ -9241,6 +9252,13 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::TapsForMana);
         assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+        // CR 109.5 + CR 605.1b: "its controller" antecedent is the enchanted
+        // land — the player who tapped it for mana. `PlayerFilter::TriggeringPlayer`
+        // rebinds the resolving ability's controller to the ManaAdded event's
+        // `player_id` so the bonus mana routes to the land's controller even
+        // when the Aura is opponent-controlled.
+        let execute = def.execute.as_deref().unwrap();
+        assert_eq!(execute.player_scope, Some(PlayerFilter::TriggeringPlayer));
     }
 
     #[test]
@@ -9254,6 +9272,29 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::TapsForMana);
         assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+        let execute = def.execute.as_deref().unwrap();
+        assert_eq!(execute.player_scope, Some(PlayerFilter::TriggeringPlayer));
+    }
+
+    #[test]
+    fn trigger_fertile_ground_its_controller_adds_routes_to_triggering_player() {
+        // CR 109.5 + CR 605.1b regression for the "its controller adds …"
+        // Aura class (Fertile Ground, Wild Growth, Utopia Sprawl, Verdant Haven,
+        // Trace of Abundance, Market Festival, Weirding Wood, Overgrowth):
+        // bonus mana must go to the enchanted land's controller, not the
+        // aura's controller, when an opponent ends up attaching the aura.
+        let def = parse_trigger_line(
+            "Whenever enchanted land is tapped for mana, its controller adds an additional one mana of any color.",
+            "Fertile Ground",
+        );
+        assert_eq!(def.mode, TriggerMode::TapsForMana);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+        let execute = def.execute.as_deref().unwrap();
+        assert_eq!(execute.player_scope, Some(PlayerFilter::TriggeringPlayer));
+        assert!(matches!(
+            execute.effect.as_ref(),
+            crate::types::ability::Effect::Mana { .. }
+        ));
     }
 
     #[test]
