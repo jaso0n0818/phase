@@ -1,11 +1,10 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity;
-use crate::game::zones;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ObjectProperty, ResolvedAbility, TargetRef, UntilCondition,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ExileLink, ExileLinkKind, GameState};
+use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
@@ -80,20 +79,29 @@ pub fn resolve(
     let mut cumulative: i32 = 0;
 
     for &obj_id in &library {
-        // CR 701.13a: Exile the card. Check the predicate after each exile so
-        // the loop terminates as soon as the stop condition is satisfied.
-        zones::move_to_zone(state, obj_id, Zone::Exile, events);
-
-        // CR 400.7 + CR 406.6: Link the exiled card to the resolving source so
-        // `TargetFilter::ExiledBySource` and the per-resolution-tracking
-        // family of filters (`OwnersOfCardsExiledBySource`,
-        // `CardsExiledBySource`) see this exile event. Matches the link kind
-        // used by `change_zone::move_object_to_zone` for non-duration exiles.
-        state.exile_links.push(ExileLink {
-            exiled_id: obj_id,
-            source_id: ability.source_id,
-            kind: ExileLinkKind::TrackedBySource,
-        });
+        // CR 701.13a: Exile the card through the shared zone-change pipeline so
+        // replacement effects, exile links, and zone bookkeeping stay identical
+        // to `Effect::ChangeZone`.
+        match super::change_zone::execute_zone_move(
+            state,
+            obj_id,
+            Zone::Library,
+            Zone::Exile,
+            ability.source_id,
+            ability.duration.as_ref(),
+            false,
+            false,
+            None,
+            &[],
+            events,
+        ) {
+            super::change_zone::ZoneMoveResult::Done => {}
+            super::change_zone::ZoneMoveResult::NeedsChoice(player) => {
+                state.waiting_for =
+                    crate::game::replacement::replacement_choice_waiting_for(player, state);
+                return Ok(());
+            }
+        }
 
         match until {
             UntilCondition::NextMatches { filter } => {
@@ -180,14 +188,15 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        Comparator, PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TypeFilter,
-        TypedFilter,
+        AbilityDefinition, AbilityKind, Comparator, PlayerFilter, QuantityExpr,
+        ReplacementDefinition, ResolvedAbility, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
 
     /// Helper: set up a card in a player's library with the given core type.
     fn add_library_card(
@@ -317,6 +326,70 @@ mod tests {
         );
         assert_eq!(state.objects.get(&faced_land).unwrap().zone, Zone::Exile);
         assert_eq!(state.objects.get(&faced_hit).unwrap().zone, Zone::Exile);
+    }
+
+    #[test]
+    fn exile_from_top_until_routes_each_move_through_replacement_pipeline() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Replacement Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Graveyard,
+                            target: TargetFilter::Any,
+                            owner_library: false,
+                            enter_transformed: false,
+                            under_your_control: false,
+                            enter_tapped: false,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                        },
+                    ))
+                    .destination_zone(Zone::Exile),
+            );
+        }
+
+        let hit = add_library_card(&mut state, PlayerId(0), "Bear", false);
+        state.players[0].library = crate::im::vector![hit];
+
+        let ability = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                until: UntilCondition::NextMatches {
+                    filter: nonland_filter(),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&hit].zone,
+            Zone::Graveyard,
+            "Moved replacement should redirect the top-card exile"
+        );
+        assert!(
+            state.players[0].graveyard.contains(&hit),
+            "redirected card should be tracked in graveyard"
+        );
+        assert!(
+            !state.exile.contains(&hit),
+            "redirected card must not remain in exile"
+        );
     }
 
     /// CR 608.2 + CR 701.57a + CR 702.85a: Etali-shape — `player_scope: All`
