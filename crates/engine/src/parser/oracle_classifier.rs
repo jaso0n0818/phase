@@ -92,11 +92,36 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         return true;
     }
 
+    if is_spell_resolution_next_untap_restriction(lower) {
+        return true;
+    }
+
     ((scan_contains(lower, "deals ") || scan_contains(lower, "deal "))
         && scan_contains(lower, "damage"))
         || scan_contains(lower, "until end of turn")
         || scan_contains(lower, "until your next turn")
         || scan_contains(lower, "this turn")
+}
+
+fn is_spell_resolution_next_untap_restriction(lower: &str) -> bool {
+    let has_next_untap_restriction = (scan_contains(lower, "doesn't untap during")
+        || scan_contains(lower, "doesn’t untap during"))
+        && scan_contains(lower, "next untap step");
+    if !has_next_untap_restriction {
+        return false;
+    }
+
+    alt((
+        tag::<_, _, OracleError<'_>>("put "),
+        tag("tap "),
+        tag("untap "),
+        tag("target "),
+        tag("that "),
+        tag("it "),
+        tag("those "),
+    ))
+    .parse(lower)
+    .is_ok()
 }
 
 fn is_spell_resolution_cast_from_hand_free(lower: &str) -> bool {

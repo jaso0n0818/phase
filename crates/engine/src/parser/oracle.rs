@@ -8938,6 +8938,58 @@ mod tests {
     }
 
     #[test]
+    fn spell_counter_tap_plus_doesnt_untap() {
+        let r = parse(
+            "Put a +1/+1 counter on up to one target creature you control. Tap up to one target creature you don't control, and that creature doesn't untap during its controller's next untap step.",
+            "Winterthorn Blessing",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert!(
+            r.statics.is_empty(),
+            "spell next-untap restriction should not produce static, got {:?}",
+            r.statics
+        );
+
+        let mut saw_counter = false;
+        let mut saw_tap = false;
+        let mut saw_cant_untap = false;
+        for ability in &r.abilities {
+            let mut cursor = Some(ability);
+            while let Some(def) = cursor {
+                match def.effect.as_ref() {
+                    Effect::PutCounter { .. } => saw_counter = true,
+                    Effect::Tap { .. } => saw_tap = true,
+                    Effect::GenericEffect {
+                        static_abilities,
+                        duration,
+                        ..
+                    } => {
+                        saw_cant_untap |= static_abilities.iter().any(|static_def| {
+                            static_def.mode == crate::types::statics::StaticMode::CantUntap
+                        }) && matches!(
+                            duration,
+                            Some(crate::types::ability::Duration::UntilNextUntapStepOf {
+                                player: crate::types::ability::PlayerScope::Controller,
+                            })
+                        );
+                    }
+                    _ => {}
+                }
+                cursor = def.sub_ability.as_deref();
+            }
+        }
+
+        assert!(saw_counter, "should parse the counter clause: {r:?}");
+        assert!(saw_tap, "should parse the tap clause: {r:?}");
+        assert!(
+            saw_cant_untap,
+            "should parse the next-untap restriction clause: {r:?}"
+        );
+    }
+
+    #[test]
     fn creature_cant_block_still_produces_static() {
         // Regression guard: non-spell "can't block" must still produce static.
         let r = parse(

@@ -6464,7 +6464,7 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     } else {
         super::oracle_effect::strip_trailing_where_x(text_tp)
     };
-    let tp = stripped_tp;
+    let tp = nom_tag_tp(&stripped_tp, "also ").unwrap_or(stripped_tp);
     let text_stripped = tp.original;
     let unquoted_text = strip_quoted_segments(text_stripped);
     let unquoted_lower = unquoted_text.to_lowercase();
@@ -8890,6 +8890,34 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn static_creatures_you_control_also_get_with_condition() {
+        let def = parse_static_line(
+            "Creatures you control also get +1/+0 and have trample as long as you control six or more creatures.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                ..
+            }))
+        ));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample,
+            }));
+        assert!(
+            def.condition.is_some(),
+            "as-long-as condition should apply to the whole static"
+        );
     }
 
     // --- New pattern tests ---
