@@ -715,59 +715,23 @@ pub(super) fn exile_alt_cost_permission_supports_cast(
     }
 }
 
-fn exile_alt_cost_permission_uses_selected_mana_cost(
-    permission: &crate::types::ability::CastingPermission,
-    selected_mana_cost: &ManaCost,
-) -> bool {
-    match permission {
-        crate::types::ability::CastingPermission::ExileWithAltCost { cost, .. } => {
-            cost == selected_mana_cost
-        }
-        crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. } => {
-            *selected_mana_cost == ManaCost::zero()
-        }
-        _ => false,
-    }
-}
-
-pub(super) fn exile_alt_cost_permissions_accept_selected_cost_and_resulting_mv(
+pub(super) fn selected_exile_alt_cost_permission_accepts_resulting_mv(
     state: &GameState,
     object_id: ObjectId,
     player: PlayerId,
     resulting_mv: u32,
-    selected_mana_cost: &ManaCost,
 ) -> bool {
     let Some(obj) = state.objects.get(&object_id) else {
         return true;
     };
 
-    let mut found_authorizing_permission = false;
-    for permission in &obj.casting_permissions {
-        match permission {
-            crate::types::ability::CastingPermission::ExileWithAltCost { granted_to, .. }
-            | crate::types::ability::CastingPermission::ExileWithAltAbilityCost {
-                granted_to,
-                ..
-            } if exile_alt_cost_permission_grants_to_player(player, *granted_to) => {
-                found_authorizing_permission = true;
-                if exile_alt_cost_permission_supports_cast(
-                    state,
-                    obj,
-                    player,
-                    permission,
-                    Some(resulting_mv),
-                ) && exile_alt_cost_permission_uses_selected_mana_cost(
-                    permission,
-                    selected_mana_cost,
-                ) {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
+    let Some(permission) = obj.casting_permissions.iter().find(|permission| {
+        exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+    }) else {
+        return true;
+    };
 
-    !found_authorizing_permission
+    exile_alt_cost_permission_supports_cast(state, obj, player, permission, Some(resulting_mv))
 }
 
 fn source_has_collection_counter_play_permission(

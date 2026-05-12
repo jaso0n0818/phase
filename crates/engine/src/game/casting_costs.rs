@@ -2152,6 +2152,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         let cascade_accepted = match evaluate_cascade_constraint_with_resulting_mv(
             state,
             object_id,
+            player,
             resulting_mv,
             events,
         ) {
@@ -2162,12 +2163,11 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
             }
         };
         if !cascade_accepted
-            && !super::casting::exile_alt_cost_permissions_accept_selected_cost_and_resulting_mv(
+            && !super::casting::selected_exile_alt_cost_permission_accepts_resulting_mv(
                 state,
                 object_id,
                 player,
                 resulting_mv,
-                cost,
             )
         {
             let pending_for_cancel = PendingCast::new(object_id, card_id, ability, cost.clone());
@@ -2470,21 +2470,27 @@ enum CascadeCheck {
 fn evaluate_cascade_constraint_with_resulting_mv(
     state: &mut GameState,
     object_id: ObjectId,
+    player: PlayerId,
     resulting_mv: u32,
     events: &mut Vec<GameEvent>,
 ) -> CascadeCheck {
     use crate::types::ability::{CastPermissionConstraint, CastingPermission};
 
     let index = match state.objects.get(&object_id) {
-        Some(obj) => obj.casting_permissions.iter().position(|p| {
-            matches!(
-                p,
-                CastingPermission::ExileWithAltCost {
+        Some(obj) => {
+            let Some(index) = obj.casting_permissions.iter().position(|p| {
+                super::casting::exile_alt_cost_permission_supports_cast(state, obj, player, p, None)
+            }) else {
+                return CascadeCheck::NotApplicable;
+            };
+            match obj.casting_permissions.get(index) {
+                Some(CastingPermission::ExileWithAltCost {
                     constraint: Some(CastPermissionConstraint::CascadeResultingMvBelow { .. }),
                     ..
-                }
-            )
-        }),
+                }) => Some(index),
+                _ => None,
+            }
+        }
         None => return CascadeCheck::NotApplicable,
     };
     let index = match index {
@@ -5620,7 +5626,7 @@ mod tests {
     mod cascade_constraint {
         use super::*;
         use crate::types::ability::{CastPermissionConstraint, CastingPermission, Comparator};
-        use crate::types::mana::ManaCostShard;
+        use crate::types::mana::{ManaCostShard, ManaType, ManaUnit};
 
         fn exile_card(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
             let card_id = CardId(state.next_object_id);
@@ -5692,6 +5698,7 @@ mod tests {
             let outcome = evaluate_cascade_constraint_with_resulting_mv(
                 &mut state,
                 hit,
+                PlayerId(0),
                 resulting_mv,
                 &mut events,
             );
@@ -5767,7 +5774,10 @@ mod tests {
             let mut state = GameState::new_two_player(42);
             let hit = exile_card(&mut state, PlayerId(0), "Mixed Permission Hit");
             let hit_obj = state.objects.get_mut(&hit).unwrap();
-            hit_obj.mana_cost = ManaCost::generic(5);
+            hit_obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X],
+                generic: 0,
+            };
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
@@ -5789,12 +5799,14 @@ mod tests {
                 });
             push_announcement_stack_entry(&mut state, hit);
 
+            let mut ability = placeholder_ability(hit);
+            ability.chosen_x = Some(5);
             let result = finalize_cast_with_phyrexian_choices(
                 &mut state,
                 PlayerId(0),
                 hit,
                 CardId(0),
-                placeholder_ability(hit),
+                ability,
                 &ManaCost::zero(),
                 CastingVariant::Normal,
                 None,
@@ -5813,6 +5825,168 @@ mod tests {
             );
         }
 
+        #[test]
+        fn final_validation_accepts_free_alt_cost_after_cost_increase() {
+            let mut state = GameState::new_two_player(42);
+            let hit = exile_card(&mut state, PlayerId(0), "Taxed Free Permission Hit");
+            let hit_obj = state.objects.get_mut(&hit).unwrap();
+            hit_obj.mana_cost = ManaCost::generic(5);
+            hit_obj
+                .casting_permissions
+                .push(CastingPermission::ExileWithAltCost {
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to: Some(PlayerId(0)),
+                });
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(99),
+                snow: false,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+            push_announcement_stack_entry(&mut state, hit);
+
+            let waiting = finalize_cast_with_phyrexian_choices(
+                &mut state,
+                PlayerId(0),
+                hit,
+                CardId(0),
+                placeholder_ability(hit),
+                &ManaCost::generic(1),
+                CastingVariant::Normal,
+                None,
+                Zone::Exile,
+                None,
+                &mut Vec::new(),
+            )
+            .expect("selected free permission must survive later cost increases");
+
+            assert_eq!(
+                waiting,
+                WaitingFor::Priority {
+                    player: PlayerId(0)
+                }
+            );
+            assert_eq!(state.players[0].mana_pool.total(), 0);
+            assert!(state.stack.iter().any(|entry| entry.id == hit));
+        }
+
+        #[test]
+        fn later_cascade_permission_cannot_authorize_selected_failing_permission() {
+            let mut state = GameState::new_two_player(42);
+            let miss = exile_card(&mut state, PlayerId(0), "Miss");
+            let hit = exile_card(&mut state, PlayerId(0), "Selected Permission Hit");
+            let hit_obj = state.objects.get_mut(&hit).unwrap();
+            hit_obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X],
+                generic: 0,
+            };
+            hit_obj
+                .casting_permissions
+                .push(CastingPermission::ExileWithAltCost {
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: Some(CastPermissionConstraint::ManaValue {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 4 },
+                    }),
+                    granted_to: Some(PlayerId(0)),
+                });
+            hit_obj
+                .casting_permissions
+                .push(CastingPermission::ExileWithAltCost {
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: Some(CastPermissionConstraint::CascadeResultingMvBelow {
+                        source_mv: 10,
+                        exiled_misses: vec![miss],
+                    }),
+                    granted_to: Some(PlayerId(0)),
+                });
+            push_announcement_stack_entry(&mut state, hit);
+
+            let mut ability = placeholder_ability(hit);
+            ability.chosen_x = Some(5);
+            let result = finalize_cast_with_phyrexian_choices(
+                &mut state,
+                PlayerId(0),
+                hit,
+                CardId(0),
+                ability,
+                &ManaCost::zero(),
+                CastingVariant::Normal,
+                None,
+                Zone::Exile,
+                None,
+                &mut Vec::new(),
+            );
+
+            assert!(
+                result.is_err(),
+                "later cascade permission must not bypass the selected permission's MV check"
+            );
+            assert!(
+                !state.stack.iter().any(|entry| entry.id == hit),
+                "failed final validation must unwind the announcement stack entry"
+            );
+        }
+
+        #[test]
+        fn wrong_player_cascade_permission_does_not_reject_selected_permission() {
+            let mut state = GameState::new_two_player(42);
+            let miss = exile_card(&mut state, PlayerId(1), "Opponent Miss");
+            let hit = exile_card(&mut state, PlayerId(0), "Authorized Hit");
+            let hit_obj = state.objects.get_mut(&hit).unwrap();
+            hit_obj.mana_cost = ManaCost::generic(5);
+            hit_obj
+                .casting_permissions
+                .push(CastingPermission::ExileWithAltCost {
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: Some(CastPermissionConstraint::CascadeResultingMvBelow {
+                        source_mv: 1,
+                        exiled_misses: vec![miss],
+                    }),
+                    granted_to: Some(PlayerId(1)),
+                });
+            hit_obj
+                .casting_permissions
+                .push(CastingPermission::ExileWithAltCost {
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to: Some(PlayerId(0)),
+                });
+            push_announcement_stack_entry(&mut state, hit);
+
+            let waiting = finalize_cast_with_phyrexian_choices(
+                &mut state,
+                PlayerId(0),
+                hit,
+                CardId(0),
+                placeholder_ability(hit),
+                &ManaCost::zero(),
+                CastingVariant::Normal,
+                None,
+                Zone::Exile,
+                None,
+                &mut Vec::new(),
+            )
+            .expect("wrong-player cascade permission must be ignored");
+
+            assert_eq!(
+                waiting,
+                WaitingFor::Priority {
+                    player: PlayerId(0)
+                }
+            );
+            assert!(state.stack.iter().any(|entry| entry.id == hit));
+        }
+
         /// CR 702.85a: X=4 with source MV 4 — resulting MV is 4, which is NOT
         /// strictly less than 4, so the cast is rejected. The permission is
         /// still consumed, and the returned misses match the original set for
@@ -5826,6 +6000,7 @@ mod tests {
             let outcome = evaluate_cascade_constraint_with_resulting_mv(
                 &mut state,
                 hit,
+                PlayerId(0),
                 resulting_mv,
                 &mut events,
             );
@@ -5863,6 +6038,7 @@ mod tests {
             let outcome = evaluate_cascade_constraint_with_resulting_mv(
                 &mut state,
                 hit,
+                PlayerId(0),
                 resulting_mv,
                 &mut events,
             );
