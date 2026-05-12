@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import type { WaitingFor } from "../types";
+import { isWaitingForHandled } from "../../game/waitingForRegistry";
+
 const ADAPTER_FILES = [
   "ws-adapter.ts",
   "p2p-adapter.ts",
@@ -83,6 +86,20 @@ describe("adapter boundary guardrails", () => {
     const tsVariants = tsUnionVariantTypes(tsSource, "WaitingFor", "// ── Learn");
 
     expect(new Set(tsVariants)).toEqual(new Set(rustVariants));
+  });
+
+  it("handles the discard-for-mana-ability waiting payload", () => {
+    const waitingFor: WaitingFor = {
+      type: "DiscardForManaAbility",
+      data: {
+        player: 0,
+        count: 1,
+        cards: [42],
+        pending_mana_ability: {},
+      },
+    };
+
+    expect(isWaitingForHandled(waitingFor)).toBe(true);
   });
 
   it("keeps the frontend GameAction union in lockstep with the engine enum", () => {
