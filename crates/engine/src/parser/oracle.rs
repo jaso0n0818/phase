@@ -8816,6 +8816,33 @@ mod tests {
     }
 
     #[test]
+    fn negative_self_casting_restriction_stays_metadata() {
+        let r = parse(
+            "You can't cast Rock Jockey if you've played a land this turn.\nYou can't play lands if Rock Jockey was cast this turn.",
+            "Rock Jockey",
+            &[],
+            &["Creature"],
+            &["Goblin", "Knight"],
+        );
+
+        assert_eq!(
+            r.casting_restrictions,
+            vec![CastingRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::Not {
+                    condition: Box::new(ParsedCondition::YouPlayedLandThisTurn),
+                }),
+            }]
+        );
+        assert!(
+            r.abilities
+                .iter()
+                .all(|ability| !matches!(*ability.effect, Effect::CastFromZone { .. })),
+            "negative casting restriction must not become CastFromZone: {:?}",
+            r.abilities
+        );
+    }
+
+    #[test]
     fn spell_restriction_then_damage_skullcrack() {
         // Skullcrack: "Players can't gain life this turn. Damage can't be prevented this turn.
         //              Skullcrack deals 3 damage to target player or planeswalker."

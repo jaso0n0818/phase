@@ -1,13 +1,16 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::value;
+use nom::combinator::{all_consuming, map, value};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_util::{parse_mana_symbols, TextPair};
 use crate::parser::oracle_condition::parse_restriction_condition;
-use crate::types::ability::{AbilityCost, AdditionalCost, CastingRestriction, SpellCastingOption};
+use crate::types::ability::{
+    AbilityCost, AdditionalCost, CastingRestriction, ParsedCondition, SpellCastingOption,
+};
 
 /// Parse "As an additional cost to cast this spell, ..." into an `AdditionalCost`.
 ///
@@ -277,6 +280,9 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
     let trimmed = text.trim().trim_end_matches('.');
     // Try direct match first, then fall back to stripping ability word prefix
     let trimmed_lower = trimmed.to_lowercase();
+    if let Some(restriction) = parse_negative_self_casting_restriction(&trimmed_lower) {
+        return Some(vec![restriction]);
+    }
     let effective = if tag::<_, _, OracleError<'_>>("cast this spell only ")
         .parse(trimmed_lower.as_str())
         .is_ok()
@@ -309,6 +315,48 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
     }
 
     (!restrictions.is_empty()).then_some(restrictions)
+}
+
+fn parse_negative_self_casting_restriction(text: &str) -> Option<CastingRestriction> {
+    let (condition_text, (subject, negated)) = preceded(
+        alt((
+            tag::<_, _, OracleError<'_>>("you can't cast "),
+            tag("you cannot cast "),
+            tag("you can\u{2019}t cast "),
+        )),
+        alt((
+            map(terminated(take_until(" if "), tag(" if ")), |subject| {
+                (subject, true)
+            }),
+            map(
+                terminated(take_until(" unless "), tag(" unless ")),
+                |subject| (subject, false),
+            ),
+        )),
+    )
+    .parse(text)
+    .ok()?;
+    let subject = subject.trim();
+    if all_consuming(alt((
+        value((), tag::<_, _, OracleError<'_>>("~")),
+        value((), tag("this spell")),
+    )))
+    .parse(subject)
+    .is_err()
+    {
+        return None;
+    }
+    let condition = parse_restriction_condition(condition_text.trim())?;
+    let condition = if negated {
+        ParsedCondition::Not {
+            condition: Box::new(condition),
+        }
+    } else {
+        condition
+    };
+    Some(CastingRestriction::RequiresCondition {
+        condition: Some(condition),
+    })
 }
 
 fn strip_casting_condition_suffixes(text: &str) -> &str {
@@ -458,7 +506,8 @@ fn scan_timing_restrictions(text: &str) -> Vec<CastingRestriction> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        ControllerRef, FilterProp, ParsedCondition, QuantityExpr, TargetFilter, TypeFilter,
+        ControllerRef, FilterProp, ParsedCondition, PlayerFilter, QuantityExpr, TargetFilter,
+        TypeFilter,
     };
     use crate::types::mana::ManaCost;
     use crate::types::zones::Zone;
@@ -588,6 +637,61 @@ mod tests {
             restrictions,
             vec![CastingRestriction::RequiresCondition {
                 condition: Some(ParsedCondition::YouCastSpellCountAtLeast { count: 1 }),
+            }]
+        );
+    }
+
+    #[test]
+    fn spell_cast_restriction_parses_negative_self_condition() {
+        for text in [
+            "You can't cast ~ if you've played a land this turn.",
+            "You cannot cast this spell if you have played a land this turn.",
+            "You can\u{2019}t cast ~ if you played a land this turn.",
+        ] {
+            let restrictions =
+                parse_casting_restriction_line(text).expect("restrictions should parse");
+            assert_eq!(
+                restrictions,
+                vec![CastingRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::Not {
+                        condition: Box::new(ParsedCondition::YouPlayedLandThisTurn),
+                    }),
+                }],
+                "text={text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn spell_cast_restriction_does_not_consume_generic_spell_subject() {
+        assert_eq!(
+            parse_casting_restriction_line(
+                "You can't cast creature spells if you've played a land this turn.",
+            ),
+            None
+        );
+        assert_eq!(
+            parse_casting_restriction_line(
+                "You can't cast cards from graveyards if you've played a land this turn.",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn spell_cast_restriction_parses_negative_self_unless_condition() {
+        let restrictions = parse_casting_restriction_line(
+            "You can't cast ~ unless an opponent lost life this turn.",
+        )
+        .expect("restrictions should parse");
+
+        assert_eq!(
+            restrictions,
+            vec![CastingRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::PlayerCountAtLeast {
+                    filter: PlayerFilter::OpponentLostLife,
+                    minimum: 1,
+                }),
             }]
         );
     }

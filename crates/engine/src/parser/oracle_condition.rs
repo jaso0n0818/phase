@@ -137,6 +137,19 @@ fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
             count: count as u32,
         });
     }
+    if all_consuming(alt((
+        value(
+            (),
+            tag::<_, _, OracleError<'_>>("you've played a land this turn"),
+        ),
+        value((), tag("you have played a land this turn")),
+        value((), tag("you played a land this turn")),
+    )))
+    .parse(text)
+    .is_ok()
+    {
+        return Some(ParsedCondition::YouPlayedLandThisTurn);
+    }
     if let Some(count) = parse_numeric_threshold(text, "you've cast ", " or more spells this turn")
     {
         return Some(ParsedCondition::YouCastSpellCountAtLeast {
@@ -1182,6 +1195,21 @@ mod tests {
             parse_restriction_condition("you control a legendary creature"),
             Some(ParsedCondition::YouControlLegendaryCreature)
         ));
+    }
+
+    #[test]
+    fn parses_land_played_this_turn_conditions() {
+        for input in [
+            "you've played a land this turn",
+            "you have played a land this turn",
+            "you played a land this turn",
+        ] {
+            assert_eq!(
+                parse_restriction_condition(input),
+                Some(ParsedCondition::YouPlayedLandThisTurn),
+                "input={input:?}"
+            );
+        }
     }
 
     #[test]

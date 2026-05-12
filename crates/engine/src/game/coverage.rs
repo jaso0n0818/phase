@@ -5951,8 +5951,11 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             let kw_name = format!("{k:?}").to_lowercase();
             lower.starts_with(&kw_name)
         }) || is_keyword_line(&lower);
-        let covered_by_casting =
-            !face.casting_restrictions.is_empty() && lower.starts_with("cast this spell only ");
+        let covered_by_casting = !face.casting_restrictions.is_empty()
+            && (lower.starts_with("cast this spell only ")
+                || lower.starts_with("you can't cast ")
+                || lower.starts_with("you cannot cast ")
+                || lower.starts_with("you can\u{2019}t cast "));
         // Casting option lines ("You may pay X rather than pay...", "If you control a
         // commander, you may cast this spell without paying its mana cost", etc.)
         let covered_by_casting_option = !face.casting_options.is_empty()

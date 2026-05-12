@@ -947,6 +947,10 @@ pub(crate) fn evaluate_condition(
                 .unwrap_or(0)
                 >= *count
         }
+        ParsedCondition::YouPlayedLandThisTurn => state
+            .players
+            .get(usize::from(player.0))
+            .is_some_and(|player| player.lands_played_this_turn > 0),
         ParsedCondition::YouCastSpellThisTurn { filter } => state
             .spells_cast_this_turn_by_player
             .get(&player)
@@ -1482,6 +1486,18 @@ mod tests {
 
         assert!(!evaluate_condition(&state, player, source_id, &condition));
         state.city_blessing.insert(player);
+        assert!(evaluate_condition(&state, player, source_id, &condition));
+    }
+
+    #[test]
+    fn land_played_restriction_checks_player_land_count() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let source_id = ObjectId(10);
+        let condition = ParsedCondition::YouPlayedLandThisTurn;
+
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+        state.players[usize::from(player.0)].lands_played_this_turn = 1;
         assert!(evaluate_condition(&state, player, source_id, &condition));
     }
 

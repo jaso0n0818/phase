@@ -3293,6 +3293,10 @@ pub enum ParsedCondition {
     YouAttackedWithAtLeast {
         count: u32,
     },
+    /// True when the player has already used at least one land play this turn.
+    /// The count is tracked on `Player::lands_played_this_turn` from
+    /// `GameEvent::LandPlayed`.
+    YouPlayedLandThisTurn,
     /// CR 602.5b + CR 109.2b: True when the player cast a spell matching
     /// `filter` this turn. `None` matches any spell.
     YouCastSpellThisTurn {
