@@ -856,10 +856,6 @@ function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
   const minCount = data.up_to ? 0 : data.count;
   const countValid = selectedIndices.length >= minCount && selectedIndices.length <= data.count;
 
-  useEffect(() => {
-    setSelectedCounts(new Map());
-  }, [data]);
-
   const toggleSelect = useCallback(
     (sideboardIndex: number, maxCopies: number) => {
       setSelectedCounts((prev) => {
