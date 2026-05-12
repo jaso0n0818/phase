@@ -19,7 +19,7 @@ use crate::types::ability::{
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::keywords::Keyword;
-use crate::types::mana::ManaColor;
+use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::StaticMode;
@@ -5678,6 +5678,40 @@ fn split_trigger_variants(norm: &str) -> Option<Vec<String>> {
     None
 }
 
+fn mana_color_word(color: ManaColor) -> &'static str {
+    match color {
+        ManaColor::White => "white",
+        ManaColor::Blue => "blue",
+        ManaColor::Black => "black",
+        ManaColor::Red => "red",
+        ManaColor::Green => "green",
+    }
+}
+
+fn mana_color_symbol(color: ManaColor) -> &'static str {
+    match color {
+        ManaColor::White => "{w}",
+        ManaColor::Blue => "{u}",
+        ManaColor::Black => "{b}",
+        ManaColor::Red => "{r}",
+        ManaColor::Green => "{g}",
+    }
+}
+
+fn mana_cost_is_single_color(cost: &ManaCost, color: ManaColor) -> bool {
+    let expected = match color {
+        ManaColor::White => ManaCostShard::White,
+        ManaColor::Blue => ManaCostShard::Blue,
+        ManaColor::Black => ManaCostShard::Black,
+        ManaColor::Red => ManaCostShard::Red,
+        ManaColor::Green => ManaCostShard::Green,
+    };
+    matches!(
+        cost,
+        ManaCost::Cost { shards, generic } if *generic == 0 && shards.as_slice() == [expected]
+    )
+}
+
 /// Per-line audit of a single card: match Oracle lines to parsed elements and check properties.
 fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> {
     let mut findings = Vec::new();
@@ -6016,6 +6050,20 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::DoubleTriggers { .. } => {
                 effective_lower.contains("triggers an additional time")
                     || effective_lower.contains("trigger an additional time")
+            }
+            StaticMode::DefilerCostReduction {
+                color,
+                life_cost,
+                mana_reduction,
+            } => {
+                let color_word = mana_color_word(*color);
+                let color_symbol = mana_color_symbol(*color);
+                let life_line = effective_lower.contains(&format!(
+                    "as an additional cost to cast {color_word} permanent spell"
+                )) && effective_lower.contains(&format!("pay {life_cost} life"));
+                let reduction_line = effective_lower
+                    .contains(&format!("those spells cost {color_symbol} less to cast"));
+                (life_line || reduction_line) && mana_cost_is_single_color(mana_reduction, *color)
             }
             StaticMode::CantBeBlocked => effective_lower.contains("can't be blocked"),
             StaticMode::CantBeBlockedExceptBy { .. } => {
@@ -8601,6 +8649,98 @@ mod tests {
         face.oracle_text = Some(oracle.to_string());
 
         assert!(audit_card_lines(oracle, &face).is_empty());
+    }
+
+    #[test]
+    fn defiler_cost_reduction_static_does_not_count_as_silent_drop() {
+        let mut face = make_face();
+        let oracle = "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost {U} less to cast if you paid life this way. This effect reduces only the amount of blue mana you pay.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::DefilerCostReduction {
+                color: ManaColor::Blue,
+                life_cost: 2,
+                mana_reduction: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 0,
+                },
+            },
+            affected: TargetFilter::SelfRef,
+            modifications: vec![],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some(
+                "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost less to cast.".to_string(),
+            ),
+        });
+
+        assert!(audit_card_lines(oracle, &face).is_empty());
+    }
+
+    #[test]
+    fn split_defiler_cost_reduction_static_does_not_count_as_silent_drop() {
+        let mut face = make_face();
+        let oracle = "As an additional cost to cast blue permanent spells, you may pay 2 life.\nThose spells cost {U} less to cast if you paid life this way.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::DefilerCostReduction {
+                color: ManaColor::Blue,
+                life_cost: 2,
+                mana_reduction: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 0,
+                },
+            },
+            affected: TargetFilter::SelfRef,
+            modifications: vec![],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some(
+                "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost less to cast.".to_string(),
+            ),
+        });
+
+        assert!(audit_card_lines(oracle, &face).is_empty());
+    }
+
+    #[test]
+    fn defiler_cost_reduction_static_does_not_cover_other_cost_lines() {
+        let mut face = make_face();
+        let oracle = "As an additional cost to cast artifact spells, you may pay 2 life. Those spells cost {1} less to cast.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::DefilerCostReduction {
+                color: ManaColor::Blue,
+                life_cost: 2,
+                mana_reduction: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 0,
+                },
+            },
+            affected: TargetFilter::SelfRef,
+            modifications: vec![],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: None,
+        });
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "unsupported non-Defiler cost reduction should remain visible: {findings:?}"
+        );
     }
 
     /// Regression: `AbilityCondition::IsYourTurn` is handled at runtime by
