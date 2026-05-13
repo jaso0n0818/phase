@@ -27,8 +27,8 @@ use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_quantity::{
-    parse_cda_quantity, parse_event_context_quantity, parse_for_each_clause,
-    parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
+    parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
+    parse_for_each_clause, parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
     parse_for_each_object_filter_clause,
 };
 use super::oracle_target::{
@@ -12716,11 +12716,27 @@ fn try_parse_damage_with_remainder<'a>(
                 .trim_end_matches('.')
                 .trim_end_matches(',')
                 .trim();
+            let target_phrase = target_phrase.trim();
+            // CR 508.5: "defending player" in an attacking creature's ability
+            // identifies the player that creature is attacking. Bind local
+            // third-person quantity refs ("they control") to that player. This
+            // is intentionally scoped to the literal parsed recipient phrase.
+            let references_defending_player =
+                nom::combinator::all_consuming(tag::<_, _, OracleError<'_>>("defending player"))
+                    .parse(target_phrase)
+                    .is_ok();
             // Parse amount using existing helpers
             let qty = crate::parser::oracle_quantity::parse_event_context_quantity(amount_phrase)
-                .or_else(|| crate::parser::oracle_quantity::parse_cda_quantity(amount_phrase));
+                .or_else(|| {
+                    if references_defending_player {
+                        ctx.with_player_scope(ControllerRef::DefendingPlayer, |amount_ctx| {
+                            parse_cda_quantity_with_context(amount_phrase, amount_ctx)
+                        })
+                    } else {
+                        parse_cda_quantity_with_context(amount_phrase, ctx)
+                    }
+                });
             if let Some(qty) = qty {
-                let target_phrase = target_phrase.trim();
                 // Route based on target phrase
                 if target_phrase == "itself" {
                     // When target is "itself", "its power" means the target's power,
@@ -14740,6 +14756,40 @@ mod tests {
                     .any(|t| matches!(t, TypeFilter::Creature)));
             }
             other => panic!("expected DamageAll against target player's creatures, got {other:?}"),
+        }
+    }
+
+    /// CR 508.5: In an attacking creature's ability, "defending player" is the
+    /// player the source is attacking, so local third-person refs in the damage
+    /// amount ("they control") bind to that player.
+    #[test]
+    fn effect_damage_to_defending_player_counts_defending_player_objects() {
+        let mut ctx = ParseContext::default();
+        let ability = parse_effect_chain_with_context(
+            "~ deals damage to defending player equal to the number of artifacts they control",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+
+        match &*ability.effect {
+            Effect::DealDamage {
+                amount:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    },
+                target: TargetFilter::DefendingPlayer,
+                damage_source: None,
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::DefendingPlayer));
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Artifact)));
+            }
+            other => panic!("expected defending-player artifact count damage, got {other:?}"),
         }
     }
 
