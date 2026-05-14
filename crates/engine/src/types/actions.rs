@@ -782,7 +782,7 @@ impl DebugAction {
                 } else {
                     let parts: Vec<String> = enter_with_counters
                         .iter()
-                        .map(|(ct, n)| format!("{n} {ct:?}"))
+                        .map(|(ct, n)| format!("{n} {}", ct.as_str()))
                         .collect();
                     format!(" with {}", parts.join(", "))
                 };

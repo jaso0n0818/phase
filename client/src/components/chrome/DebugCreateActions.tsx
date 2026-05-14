@@ -4,6 +4,7 @@ import type {
   CoreType,
   CounterType,
   DebugAction,
+  Keyword,
   ManaColor,
   PlayerId,
   Zone,
@@ -71,12 +72,10 @@ const COLOR_LABELS: Record<ManaColor, string> = {
 // the canonical SBA-relevant set so a single click resolves the "0/0 token
 // dies" case. Default is `P1P1` because that's the counter every 0/0-shape
 // printed card uses to make tokens survive.
-const COUNTER_OPTIONS: readonly { value: CounterType; label: string }[] = [
-  { value: "P1P1", label: "+1/+1" },
-  { value: "M1M1", label: "-1/-1" },
-  { value: "loyalty", label: "Loyalty" },
-  { value: "stun", label: "Stun" },
-];
+// Counter types exposed in the debug picker. Values are the canonical serde
+// wire strings — matching what the engine emits in `state.objects[*].counters`
+// — so the dropdown labels also serve as documentation for the wire format.
+const COUNTER_OPTIONS: readonly CounterType[] = ["P1P1", "M1M1", "loyalty", "stun"];
 
 interface CounterPickerProps {
   counterType: CounterType;
@@ -96,17 +95,11 @@ function CounterPicker({
   return (
     <>
       <FieldRow label="Counter Type">
-        <select
+        <SelectInput
           value={counterType}
-          onChange={(e) => setCounterType(e.target.value as CounterType)}
-          className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1 font-mono text-xs text-gray-200"
-        >
-          {COUNTER_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
+          onChange={setCounterType}
+          options={COUNTER_OPTIONS}
+        />
       </FieldRow>
       <FieldRow label="Counters">
         <NumberInput value={count} onChange={setCount} />
@@ -118,6 +111,10 @@ function CounterPicker({
   );
 }
 
+// Clamp non-positive counts to zero (an empty `enter_with_counters` payload)
+// so the wire never carries a negative `u32` that would fail deserialization
+// on the Rust side. `NumberInput` doesn't enforce a minimum at the input
+// boundary, so this is the safety net.
 function buildEnterCounters(
   counterType: CounterType,
   count: number,
@@ -182,14 +179,28 @@ function categoryLabel(c: TokenCategory): string {
   return CATEGORY_LABELS.find((x) => x.key === c)?.label ?? c;
 }
 
+// Parameterized keywords (Ward, Protection, Annihilator) serialize as
+// `{ Variant: data }` objects; plain keywords serialize as strings. Render
+// the variant name in both cases so the summary never shows `[object Object]`.
+function keywordLabel(k: Keyword): string {
+  return typeof k === "string" ? k : (Object.keys(k)[0] ?? "");
+}
+
 function presetSummary(p: TokenPreset): string {
   const ch = p.body;
   const pt =
     ch.power !== null && ch.toughness !== null ? `${ch.power}/${ch.toughness} ` : "";
   const colors = ch.colors.length === 0 ? "C" : ch.colors.map((c) => c[0]).join("");
+  // Show non-Creature core types so an "Enchantment Creature — Bird" preset
+  // disambiguates from a plain "Creature — Bird" preset that shares P/T,
+  // colors, subtypes, and keywords (real collisions exist in known-tokens.toml).
+  const extraTypes = ch.core_types.filter((t) => t !== "Creature");
+  const typesPrefix = extraTypes.length > 0 ? ` ${extraTypes.join(" ")}` : "";
   const subtypes = ch.subtypes.length > 0 ? ` ${ch.subtypes.join(" ")}` : "";
-  const kw = ch.keywords.length > 0 ? ` — ${ch.keywords.join(", ")}` : "";
-  return `${pt}${colors}${subtypes} ${ch.display_name}${kw}`.replace(/\s+/g, " ").trim();
+  const kw = ch.keywords.length > 0 ? ` — ${ch.keywords.map(keywordLabel).join(", ")}` : "";
+  return `${pt}${colors}${typesPrefix}${subtypes} ${ch.display_name}${kw}`
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function CatalogTokenForm({ onDispatch }: Props) {
@@ -208,6 +219,14 @@ function CatalogTokenForm({ onDispatch }: Props) {
         setLoadError(e instanceof Error ? e.message : String(e));
       });
   }, []);
+
+  // Reset the counter count when the user switches presets so a count set
+  // for a 0/0 body doesn't silently carry over and pump a different preset.
+  // Counter *type* persists deliberately — that's a user preference, not a
+  // per-preset choice.
+  useEffect(() => {
+    setCounterCount(0);
+  }, [selectedId]);
 
   const filtered = useMemo(() => {
     if (!presets) return [];
@@ -256,13 +275,17 @@ function CatalogTokenForm({ onDispatch }: Props) {
   const selectedPreset = presets?.find((p) => p.id === selectedId) ?? null;
   // CR 704.5f hint: cite the rule that explains why this token would die.
   // FE string formatting over engine-provided fields — no game-state inference.
+  // Only `+1/+1` (P1P1) counters raise toughness and prevent the SBA kill;
+  // a stack of `loyalty` or `stun` counters won't save a 0/0, so the hint
+  // remains until the user picks a counter type that actually helps.
+  const counterRescues = counterType === "P1P1" && counterCount > 0;
   const survivalHint =
     selectedPreset &&
     selectedPreset.body.core_types.includes("Creature") &&
     selectedPreset.body.power === 0 &&
     selectedPreset.body.toughness === 0 &&
-    counterCount === 0
-      ? "0/0 creature dies to state-based actions — add counters to keep it alive (CR 704.5f)."
+    !counterRescues
+      ? "0/0 creature dies to state-based actions — add +1/+1 counters to keep it alive (CR 704.5f)."
       : undefined;
 
   const handleSubmit = () => {
@@ -400,12 +423,11 @@ function CustomTokenForm({ onDispatch }: Props) {
   };
 
   // CR 704.5f hint: same display-only annotation used by the catalog form.
+  // Only `+1/+1` (P1P1) counters raise toughness and prevent the SBA kill.
+  const counterRescues = counterType === "P1P1" && counterCount > 0;
   const survivalHint =
-    coreTypes.includes("Creature") &&
-    power === 0 &&
-    toughness === 0 &&
-    counterCount === 0
-      ? "0/0 creature dies to state-based actions — add counters to keep it alive (CR 704.5f)."
+    coreTypes.includes("Creature") && power === 0 && toughness === 0 && !counterRescues
+      ? "0/0 creature dies to state-based actions — add +1/+1 counters to keep it alive (CR 704.5f)."
       : undefined;
 
   return (

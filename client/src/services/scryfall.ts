@@ -379,9 +379,10 @@ export async function fetchTokenImageUrl(
 
   // Progressive fallback ladder:
   //   1. Most specific: name + P/T + colors + every subtype.
-  //   2. Drop trailing subtypes one at a time (keeps the leading/most
-  //      specific subtype longest — token printings most reliably index the
-  //      first creature subtype).
+  //   2. Drop trailing subtypes one at a time (keeps the leading subtype
+  //      longest — for MTG creature tokens the first subtype is the race
+  //      (e.g. "Spirit" in "Spirit Soldier"), and Scryfall token printings
+  //      most reliably index the race rather than the class).
   //   3. Drop subtypes entirely.
   //   4. Drop P/T (existing fallback shape).
   // Each step relaxes exactly one axis. Stop at the first non-empty hit.
