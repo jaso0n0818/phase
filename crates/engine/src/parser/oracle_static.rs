@@ -16630,6 +16630,72 @@ mod tests {
         );
     }
 
+    /// CR 611.2b + CR 703.4q: SHAPE test for The Last Agni Kai's *full
+    /// printed Oracle text* — the two-sentence card (fight + excess-damage
+    /// mana rider on line 1, retention static on line 2) routed through
+    /// the card-level entry point `parse_oracle_text`.
+    ///
+    /// The pre-parser line-splitter delivers each sentence to its own
+    /// dispatch path, so the retention clause reaches the spell-effect
+    /// parser independently of the fight clause; the existing
+    /// `until_end_of_turn_retain_unspent_color_mana_installs_generic_effect`
+    /// test in `oracle_effect/mod.rs` already covers the second-line
+    /// behavior in isolation. This regression test pins the full printed
+    /// text so a future change to line splitting, chained-clause handling,
+    /// or sentence dispatch cannot silently drop the retention sub-effect.
+    #[test]
+    fn card_text_the_last_agni_kai_full_printed_text() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::{Duration, Effect};
+        use crate::types::mana::{ManaColor, StepEndManaAction};
+
+        let parsed = parse_oracle_text(
+            "Target creature you control fights target creature an opponent \
+             controls. If the creature the opponent controls is dealt excess \
+             damage this way, add that much {R}.\n\
+             Until end of turn, you don't lose unspent red mana as steps and \
+             phases end.",
+            "The Last Agni Kai",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+
+        // Exactly two top-level spell abilities, one per printed sentence.
+        assert_eq!(
+            parsed.abilities.len(),
+            2,
+            "expected 2 spell abilities, got {:?}",
+            parsed.abilities
+        );
+
+        // Sentence 2: the retention rider installs a turn-scoped
+        // `StepEndUnspentMana { Red, Retain }` via `GenericEffect`.
+        let retention_ability = parsed
+            .abilities
+            .iter()
+            .find(|a| matches!(*a.effect, Effect::GenericEffect { .. }))
+            .expect("retention sentence should parse as GenericEffect");
+        let Effect::GenericEffect {
+            ref static_abilities,
+            ref duration,
+            ..
+        } = *retention_ability.effect
+        else {
+            unreachable!()
+        };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(
+            static_abilities[0].mode,
+            StaticMode::StepEndUnspentMana {
+                filter: Some(ManaColor::Red),
+                action: StepEndManaAction::Retain,
+            }
+        );
+        assert_eq!(static_abilities[0].affected, Some(TargetFilter::Controller));
+    }
+
     #[test]
     fn static_cant_be_equipped_or_enchanted_compound_multi() {
         // CR 701.3 + CR 702.5 + CR 702.6: The compound phrase must emit BOTH
