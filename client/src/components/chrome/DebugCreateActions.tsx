@@ -121,7 +121,9 @@ function presetSummary(p: TokenPreset): string {
   const pt =
     ch.power !== null && ch.toughness !== null ? `${ch.power}/${ch.toughness} ` : "";
   const colors = ch.colors.length === 0 ? "C" : ch.colors.map((c) => c[0]).join("");
-  return `${pt}${colors} ${ch.display_name}`;
+  const subtypes = ch.subtypes.length > 0 ? ` ${ch.subtypes.join(" ")}` : "";
+  const kw = ch.keywords.length > 0 ? ` — ${ch.keywords.join(", ")}` : "";
+  return `${pt}${colors}${subtypes} ${ch.display_name}${kw}`.replace(/\s+/g, " ").trim();
 }
 
 function CatalogTokenForm({ onDispatch }: Props) {
