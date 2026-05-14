@@ -81,10 +81,18 @@ impl From<ManaColor> for ManaType {
 /// extending this enum. Likewise, any effect that fires at a non-step-end
 /// time (e.g., on cost payment, on damage) does not belong here.
 ///
-/// See `game::static_abilities::player_step_end_mana_handlers` for the
-/// forward-compatible scan over both `Retain` and `Transform` actions: the
-/// transient-effect path picks up spell-installed handlers of either action
-/// today (dormant for `Transform`, since no current spell installs one).
+/// Runtime path: handlers are scanned per-player by
+/// `game::turns::scan_step_end_mana_handlers` (combining
+/// `battlefield_active_statics` with `transient_continuous_effects` keyed on
+/// `SpecificPlayer`) and surface as `StepEndManaScanEntry` rows in
+/// `state.pending_step_end_mana_handlers`. The replacement pipeline
+/// (`empty_mana_pool_matcher` + the Path-A carve-out
+/// `apply_empty_mana_pool_replacement` in `game::replacement`) flips
+/// per-unit dispositions via the CR 616.1 player-choice surface; the final
+/// pool mutation runs in `apply_empty_mana_pool_decisions`. The TCE
+/// scan accepts both `Retain` and `Transform` arms — `Transform` is
+/// forward-compatible for a future spell-installed transformation rider
+/// (today only the printed-static path produces it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StepEndManaAction {
     Retain,
