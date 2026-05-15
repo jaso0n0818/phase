@@ -722,6 +722,7 @@ pub fn assign_targets_in_chain(
 }
 
 pub fn assign_selected_slots_in_chain(
+    state: &GameState,
     ability: &mut ResolvedAbility,
     selected_slots: &[Option<TargetRef>],
 ) -> Result<(), EngineError> {
@@ -730,7 +731,7 @@ pub fn assign_selected_slots_in_chain(
         return Ok(());
     }
     let mut next_slot = 0usize;
-    assign_selected_slots_recursive(ability, selected_slots, &mut next_slot)?;
+    assign_selected_slots_recursive(state, ability, selected_slots, &mut next_slot)?;
     if next_slot != selected_slots.len() {
         return Err(EngineError::InvalidAction(
             "Unused selected target slots".to_string(),
@@ -2136,11 +2137,16 @@ fn assign_targets_recursive(
                 .map(minimum_targets_in_chain)
                 .unwrap_or(0);
             let remaining_after_current = targets.len().saturating_sub(*next_target);
-            let current_count = remaining_after_current.saturating_sub(remaining_minimum);
-            if current_count < spec.min
-                || resolve_multi_target_max(state, ability, spec)
-                    .is_some_and(|max_targets| current_count > max_targets.max(spec.min))
-            {
+            // Issue #321: cap at this node's own resolved `multi_target` max so a
+            // node does not claim a downstream `up to N` effect's optional
+            // targets. Mirrors the cap in `assign_selected_slots_recursive`.
+            let node_max = resolve_multi_target_max(state, ability, spec)
+                .map(|max_targets| max_targets.max(spec.min))
+                .unwrap_or(remaining_after_current);
+            let current_count = remaining_after_current
+                .saturating_sub(remaining_minimum)
+                .min(node_max);
+            if current_count < spec.min {
                 return Err(EngineError::InvalidAction(
                     "Incorrect number of multi-target selections".to_string(),
                 ));
@@ -2180,6 +2186,7 @@ fn assign_targets_recursive(
 }
 
 fn assign_selected_slots_recursive(
+    state: &GameState,
     ability: &mut ResolvedAbility,
     selected_slots: &[Option<TargetRef>],
     next_slot: &mut usize,
@@ -2191,7 +2198,7 @@ fn assign_selected_slots_recursive(
         )
     }) {
         if ability.context.additional_cost_paid {
-            assign_selected_slots_recursive(sub_ability, selected_slots, next_slot)?;
+            assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
             ability.targets = sub_ability.targets.clone();
             return Ok(());
         }
@@ -2219,6 +2226,7 @@ fn assign_selected_slots_recursive(
         }
         if defers_sub_ability_target_selection(&ability.effect) {
             assign_selected_slots_after_deferred_effect(
+                state,
                 ability.sub_ability.as_deref_mut(),
                 selected_slots,
                 next_slot,
@@ -2229,7 +2237,7 @@ fn assign_selected_slots_recursive(
             if defers_conditional_target_selection(sub_ability) {
                 return Ok(());
             }
-            assign_selected_slots_recursive(sub_ability, selected_slots, next_slot)?;
+            assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
         }
         return Ok(());
     }
@@ -2256,6 +2264,7 @@ fn assign_selected_slots_recursive(
         }
         if defers_sub_ability_target_selection(&ability.effect) {
             assign_selected_slots_after_deferred_effect(
+                state,
                 ability.sub_ability.as_deref_mut(),
                 selected_slots,
                 next_slot,
@@ -2266,7 +2275,7 @@ fn assign_selected_slots_recursive(
             if defers_conditional_target_selection(sub_ability) {
                 return Ok(());
             }
-            assign_selected_slots_recursive(sub_ability, selected_slots, next_slot)?;
+            assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
         }
         return Ok(());
     }
@@ -2303,7 +2312,21 @@ fn assign_selected_slots_recursive(
                 .map(minimum_targets_in_chain)
                 .unwrap_or(0);
             let remaining_after_current = selected_slots.len().saturating_sub(*next_slot);
-            let current_slots = remaining_after_current.saturating_sub(remaining_minimum);
+            // Issue #321: A multi-target node must consume only as many slots as
+            // `collect_target_slots` produced for it — i.e. its own resolved
+            // `multi_target` max (clamped to `spec.min`). Subtracting only the
+            // sub-chain's *minimum* is not enough: when a downstream effect is
+            // itself `up to N` (min 0), the current node would greedily claim
+            // the sub-effect's optional slots too, applying its effect (e.g.
+            // Betor's "+1/+1 counters" PutCounter) to the graveyard-return
+            // target as well. Cap at this node's max so each effect resolves
+            // against exactly its own chosen targets (CR 601.2c).
+            let node_max = resolve_multi_target_max(state, ability, spec)
+                .map(|max_targets| max_targets.max(spec.min))
+                .unwrap_or(remaining_after_current);
+            let current_slots = remaining_after_current
+                .saturating_sub(remaining_minimum)
+                .min(node_max);
             let end_slot = *next_slot + current_slots;
             let Some(window) = selected_slots.get(*next_slot..end_slot) else {
                 return Err(EngineError::InvalidAction(
@@ -2338,6 +2361,7 @@ fn assign_selected_slots_recursive(
     }
     if defers_sub_ability_target_selection(&ability.effect) {
         assign_selected_slots_after_deferred_effect(
+            state,
             ability.sub_ability.as_deref_mut(),
             selected_slots,
             next_slot,
@@ -2348,7 +2372,7 @@ fn assign_selected_slots_recursive(
         if defers_conditional_target_selection(sub_ability) {
             return Ok(());
         }
-        assign_selected_slots_recursive(sub_ability, selected_slots, next_slot)?;
+        assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
     }
     Ok(())
 }
@@ -2377,6 +2401,7 @@ fn assign_targets_after_deferred_effect(
 }
 
 fn assign_selected_slots_after_deferred_effect(
+    state: &GameState,
     sub_ability: Option<&mut ResolvedAbility>,
     selected_slots: &[Option<TargetRef>],
     next_slot: &mut usize,
@@ -2389,12 +2414,13 @@ fn assign_selected_slots_after_deferred_effect(
     }
     if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
         return assign_selected_slots_after_deferred_effect(
+            state,
             sub_ability.sub_ability.as_deref_mut(),
             selected_slots,
             next_slot,
         );
     }
-    assign_selected_slots_recursive(sub_ability, selected_slots, next_slot)
+    assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)
 }
 
 /// CR 115.3: Validate targeting constraints — e.g., different target players must be distinct.
@@ -3231,6 +3257,7 @@ mod tests {
             .contains(&TargetRef::Object(artifact)));
 
         assign_selected_slots_in_chain(
+            &state,
             &mut ability,
             &[
                 Some(TargetRef::Player(PlayerId(0))),
@@ -4067,8 +4094,13 @@ mod tests {
             PlayerId(0),
         ));
 
-        assign_selected_slots_in_chain(&mut ability, &[None, Some(TargetRef::Player(PlayerId(1)))])
-            .expect("slot-based assignment should support skipped optional targets");
+        let state = GameState::new_two_player(42);
+        assign_selected_slots_in_chain(
+            &state,
+            &mut ability,
+            &[None, Some(TargetRef::Player(PlayerId(1)))],
+        )
+        .expect("slot-based assignment should support skipped optional targets");
 
         assert!(ability.targets.is_empty());
         assert_eq!(
@@ -4546,7 +4578,9 @@ mod tests {
         let counter_source = TargetRef::Object(ObjectId(1));
         let destination = TargetRef::Object(ObjectId(2));
 
+        let state = GameState::new_two_player(42);
         assign_selected_slots_in_chain(
+            &state,
             &mut ability,
             &[Some(counter_source.clone()), Some(destination.clone())],
         )
@@ -4778,7 +4812,9 @@ mod tests {
         );
         ability.multi_target = Some(crate::types::ability::MultiTargetSpec::fixed(0, 2));
 
+        let state = GameState::new_two_player(42);
         assign_selected_slots_in_chain(
+            &state,
             &mut ability,
             &[
                 Some(TargetRef::Object(ObjectId(1))),

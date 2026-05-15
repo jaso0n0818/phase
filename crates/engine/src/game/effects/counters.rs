@@ -1431,6 +1431,7 @@ mod tests {
             PlayerId(0),
         );
         crate::game::ability_utils::assign_selected_slots_in_chain(
+            &state,
             &mut ability,
             &[
                 Some(TargetRef::Object(counter_source_id)),

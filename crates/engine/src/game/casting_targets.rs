@@ -289,7 +289,7 @@ pub(crate) fn handle_choose_target(
         }),
         TargetSelectionAdvance::Complete(selected_slots) => {
             let mut ability = pending.ability.clone();
-            assign_selected_slots_in_chain(&mut ability, &selected_slots)?;
+            assign_selected_slots_in_chain(state, &mut ability, &selected_slots)?;
 
             if let Some(ability_index) = pending.activation_ability_index {
                 if let Some(ref activation_cost) = pending.activation_cost {

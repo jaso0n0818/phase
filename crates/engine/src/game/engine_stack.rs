@@ -157,7 +157,7 @@ pub(super) fn handle_trigger_target_selection_choose_target(
                 .take()
                 .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
             let mut ability = trigger.ability.clone();
-            assign_selected_slots_in_chain(&mut ability, &selected_slots)?;
+            assign_selected_slots_in_chain(state, &mut ability, &selected_slots)?;
 
             Ok(finalize_trigger_target_selection(
                 state, trigger, ability, events,
