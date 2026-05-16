@@ -1,7 +1,8 @@
+use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{
     CombatDamageScope, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectError,
-    EffectKind, FilterProp, PreventionScope, ReplacementDefinition, ResolvedAbility, TargetFilter,
-    TargetRef,
+    EffectKind, FilterProp, PreventionAmount, PreventionScope, ReplacementDefinition,
+    ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -122,15 +123,16 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (amount, target, scope, effect_source_filter) = match &ability.effect {
+    let (amount, amount_dynamic, target, scope, effect_source_filter) = match &ability.effect {
         Effect::PreventDamage {
             amount,
+            amount_dynamic,
             target,
             scope,
             damage_source_filter,
-            ..
         } => (
             *amount,
+            amount_dynamic.clone(),
             target.clone(),
             *scope,
             damage_source_filter.clone(),
@@ -140,6 +142,16 @@ pub fn resolve(
                 "expected PreventDamage effect".to_string(),
             ))
         }
+    };
+
+    // CR 615.11: A dynamic prevention amount is resolved to a concrete depletion
+    // count at effect-resolution time; the Next(n) shield itself is always static.
+    let amount = match amount_dynamic {
+        Some(expr) => {
+            let n = resolve_quantity(state, &expr, ability.controller, ability.source_id);
+            PreventionAmount::Next(u32::try_from(n.max(0)).unwrap_or(0))
+        }
+        None => amount,
     };
 
     // Build the prevention shield replacement definition.
@@ -281,6 +293,7 @@ mod tests {
         ResolvedAbility::new(
             Effect::PreventDamage {
                 amount,
+                amount_dynamic: None,
                 target: TargetFilter::Any,
                 scope,
                 damage_source_filter: None,
@@ -327,6 +340,49 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_amount_resolves_to_static_next_shield() {
+        // CR 615.11: a dynamic prevention amount is resolved to a concrete
+        // Next(n) depletion shield at effect-resolution time. Building-block
+        // test for the amount_dynamic override path, independent of any card.
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Cover of Winter".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::Next(1),
+                amount_dynamic: Some(QuantityExpr::Fixed { value: 4 }),
+                target: TargetFilter::Any,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = state.objects.get(&source).unwrap();
+        assert_eq!(obj.replacement_definitions.len(), 1);
+        assert!(
+            matches!(
+                obj.replacement_definitions[0].shield_kind,
+                ShieldKind::Prevention {
+                    amount: PreventionAmount::Next(4)
+                }
+            ),
+            "dynamic Fixed(4) should resolve to a Next(4) shield, got {:?}",
+            obj.replacement_definitions[0].shield_kind
+        );
+    }
+
+    #[test]
     fn chosen_damage_source_resolves_to_specific_source_and_rechecked_filter() {
         let mut state = GameState::new_two_player(42);
         let source = create_object(
@@ -358,6 +414,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
                 amount: PreventionAmount::All,
+                amount_dynamic: None,
                 target: TargetFilter::Any,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: Some(TargetFilter::ChosenDamageSource),
@@ -528,6 +585,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
                 amount: PreventionAmount::All,
+                amount_dynamic: None,
                 target: TargetFilter::Controller,
                 scope: PreventionScope::CombatDamage,
                 damage_source_filter: None,
@@ -792,6 +850,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
                 amount: PreventionAmount::All,
+                amount_dynamic: None,
                 target: TargetFilter::ParentTarget,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,

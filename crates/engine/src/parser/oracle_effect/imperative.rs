@@ -2618,8 +2618,15 @@ fn parse_prevent_effect(text: &str) -> Effect {
         TargetFilter::Any
     };
 
+    // CR 615.11 + CR 107.3i: `amount_dynamic` (the "prevent X … where X is
+    // <quantity>" override) is populated at chunk level by
+    // `apply_where_x_effect_expression`, not here — the chunk machinery
+    // strips the trailing "where x is …" binding before this parser ever
+    // sees it. `amount` is the Next(1) fallback used when no dynamic clause
+    // is present (or when the binding fails to resolve to a known quantity).
     Effect::PreventDamage {
         amount,
+        amount_dynamic: None,
         target,
         scope,
         damage_source_filter: None,

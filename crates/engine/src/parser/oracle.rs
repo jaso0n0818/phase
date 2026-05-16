@@ -2152,6 +2152,7 @@ pub(crate) fn parse_oracle_ir(
                 AbilityKind::Spell,
                 Effect::PreventDamage {
                     amount: PreventionAmount::All,
+                    amount_dynamic: None,
                     target: TargetFilter::Any,
                     scope: PreventionScope::AllDamage,
                     damage_source_filter: Some(TargetFilter::Typed(source_filter)),
@@ -7494,6 +7495,86 @@ mod tests {
                 "expected PreventDamage All + CombatDamage, got {:?}",
                 effect
             ),
+        }
+    }
+
+    #[test]
+    fn prevent_dynamic_amount_where_x_is_counters() {
+        use crate::types::ability::{ObjectScope, PreventionAmount, QuantityExpr, QuantityRef};
+        use crate::types::counter::CounterType;
+        // Cover of Winter class: "prevent X … where X is the number of age
+        // counters on this enchantment". The chunk machinery strips the
+        // trailing "where x is …" binding and `apply_where_x_effect_expression`
+        // re-applies it onto `Effect::PreventDamage::amount_dynamic`. Driven
+        // through the full `parse` path because the chunk-level where-X
+        // mechanism does not run inside the single-clause `parse_effect`.
+        let parsed = parse(
+            "If a creature would deal combat damage to you and/or one or more creatures \
+             you control, prevent X of that damage, where X is the number of age counters \
+             on this enchantment.",
+            "Cover of Winter",
+            &[],
+            &["Snow", "Enchantment"],
+            &[],
+        );
+        let prevent = parsed
+            .abilities
+            .iter()
+            .find(|a| matches!(&*a.effect, Effect::PreventDamage { .. }))
+            .expect("expected a PreventDamage ability");
+        match &*prevent.effect {
+            Effect::PreventDamage {
+                amount: PreventionAmount::Next(1),
+                amount_dynamic:
+                    Some(QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::CountersOn {
+                                scope: ObjectScope::Source,
+                                counter_type: Some(ct),
+                            },
+                    }),
+                ..
+            } => assert_eq!(*ct, CounterType::Generic("age".to_string())),
+            other => panic!("expected PreventDamage with dynamic age counters, got {other:?}"),
+        }
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .all(|w| w.to_string().split_whitespace().next() != Some("Swallow:DynamicQty")),
+            "DynamicQty swallow warning should clear, got {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    #[test]
+    fn prevent_all_damage_has_no_dynamic_amount() {
+        use crate::parser::oracle_effect::parse_effect;
+        use crate::types::ability::PreventionAmount;
+        let effect = parse_effect("prevent all damage that would be dealt this turn");
+        match effect {
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                ..
+            } => {}
+            other => panic!("expected PreventDamage All + no dynamic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prevent_next_3_has_no_dynamic_amount() {
+        use crate::parser::oracle_effect::parse_effect;
+        use crate::types::ability::PreventionAmount;
+        let effect =
+            parse_effect("prevent the next 3 damage that would be dealt to any target this turn");
+        match effect {
+            Effect::PreventDamage {
+                amount: PreventionAmount::Next(3),
+                amount_dynamic: None,
+                ..
+            } => {}
+            other => panic!("expected PreventDamage Next(3) + no dynamic, got {other:?}"),
         }
     }
 

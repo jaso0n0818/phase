@@ -5279,6 +5279,13 @@ pub enum Effect {
     /// CR 615: Prevent damage to a target.
     PreventDamage {
         amount: PreventionAmount,
+        /// CR 615.11 + CR 107.3i: When present, overrides `amount` at effect
+        /// resolution — the dynamic quantity is resolved to a concrete count and
+        /// the prevention shield is created as a static `Next(n)` depletion shield.
+        /// Set by "prevent X … where X is <quantity>" clauses. `None` for the
+        /// common fixed/All forms.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        amount_dynamic: Option<QuantityExpr>,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
         #[serde(default)]

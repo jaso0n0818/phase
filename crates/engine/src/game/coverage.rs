@@ -8515,6 +8515,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::PreventDamage {
                     amount: PreventionAmount::All,
+                    amount_dynamic: None,
                     target: TargetFilter::Any,
                     scope: PreventionScope::AllDamage,
                     damage_source_filter: None,

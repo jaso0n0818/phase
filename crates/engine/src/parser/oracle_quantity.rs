@@ -1369,6 +1369,22 @@ mod tests {
     }
 
     #[test]
+    fn quantity_ref_age_counters_on_normalized_self() {
+        // Phase-1 prerequisite for the dynamic damage-prevention amount
+        // (Cover of Winter): "this enchantment" is `~`-normalized before the
+        // imperative effect parser sees the clause, so the quantity text that
+        // reaches parse_quantity_ref is "the number of age counters on ~".
+        let qty = parse_quantity_ref("the number of age counters on ~").unwrap();
+        match qty {
+            QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(ref counter_type),
+            } => assert_eq!(*counter_type, CounterType::Generic("age".to_string())),
+            other => panic!("Expected CountersOn{{Source, age}}, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn for_each_singular_counter_on_self() {
         // Singular "counter on ~" (not "counters on ~")
         let qty = parse_for_each_clause("blight counter on it").unwrap();

@@ -950,6 +950,7 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
     Some(ParsedEffectClause {
         effect: Effect::PreventDamage {
             amount: PreventionAmount::All,
+            amount_dynamic: None,
             target,
             scope: PreventionScope::AllDamage,
             damage_source_filter: None,
@@ -13920,6 +13921,11 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
             *power = apply_where_x_expression(power.clone(), where_x_expression);
             *toughness = apply_where_x_expression(toughness.clone(), where_x_expression);
         }
+        Effect::PreventDamage { amount_dynamic, .. } => {
+            if let Some(expr) = where_x_expression {
+                *amount_dynamic = parse_where_x_quantity_expression(expr);
+            }
+        }
         _ => {}
     }
 }
@@ -26295,11 +26301,13 @@ mod tests {
         match &*prevent.effect {
             Effect::PreventDamage {
                 amount,
+                amount_dynamic,
                 target,
                 scope,
                 damage_source_filter,
             } => {
                 assert_eq!(*amount, PreventionAmount::All);
+                assert!(amount_dynamic.is_none());
                 assert_eq!(*target, TargetFilter::ParentTarget);
                 assert_eq!(*scope, PreventionScope::AllDamage);
                 assert!(damage_source_filter.is_none());

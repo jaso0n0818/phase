@@ -2608,6 +2608,7 @@ pub fn convert_create_replace_would_deal_damage_until(
     let (scope, source_filter) = damage_event_to_prevent_scope(event)?;
     Ok(engine::types::ability::Effect::PreventDamage {
         amount,
+        amount_dynamic: None,
         target: engine::types::ability::TargetFilter::Any,
         scope,
         damage_source_filter: source_filter,
@@ -2643,6 +2644,7 @@ pub fn convert_create_future_replace_would_deal_damage(
     let (amount, scope, source_filter) = future_damage_event_to_prevent_params(event)?;
     Ok(engine::types::ability::Effect::PreventDamage {
         amount,
+        amount_dynamic: None,
         target: engine::types::ability::TargetFilter::Any,
         scope,
         damage_source_filter: source_filter,
