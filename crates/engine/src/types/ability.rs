@@ -38,6 +38,19 @@ pub enum Chooser {
     Opponent,
 }
 
+/// CR 400.1 + CR 608.2c: Which player's zone supplies cards for a direct
+/// zone choice during resolution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ZoneOwner {
+    /// The controller of the spell/ability owns the referenced zone.
+    #[default]
+    Controller,
+    /// The first player target of the resolving spell/ability owns the referenced zone.
+    TargetedPlayer,
+    /// An opponent of the controller owns the referenced zone.
+    Opponent,
+}
+
 /// CR 101.4: Who selects permanents in a multi-player category choice effect
 /// (e.g., Cataclysm, Tragic Arrogance). Determines whether each player independently
 /// chooses which of their permanents to keep, or the spell's controller decides for everyone.
@@ -5386,7 +5399,8 @@ pub enum Effect {
     },
     /// Choose card(s) from a zone (typically exiled cards from a prior effect).
     /// Building block for impulse draw, cascade, hideaway, and similar exile-then-select patterns.
-    /// The selection is from the tracked set of the parent effect's result.
+    /// The selection is from the tracked set of the parent effect's result, falling back to
+    /// direct zone contents for wordings like "choose a card in your hand."
     /// CR 700.2: The `chooser` field determines who makes the selection.
     ChooseFromZone {
         /// How many cards to choose.
@@ -5394,6 +5408,15 @@ pub enum Effect {
         count: u32,
         /// Which zone the cards are in (usually Exile).
         zone: Zone,
+        /// Additional zones that share the same owner and filter.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        additional_zones: Vec<Zone>,
+        /// Which player's zone(s) are searched when no tracked set is available.
+        #[serde(default)]
+        zone_owner: ZoneOwner,
+        /// Optional filter for direct zone-backed choices.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
         /// Who makes the choice: controller (default) or opponent.
         #[serde(default)]
         chooser: Chooser,

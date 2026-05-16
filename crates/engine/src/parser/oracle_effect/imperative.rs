@@ -28,7 +28,7 @@ use crate::types::ability::{
     ContinuousModification, ControllerRef, CopyRetargetPermission, Duration, Effect, FilterProp,
     GainLifePlayer, LibraryPosition, MultiTargetSpec, PaymentCost, PlayerScope, PreventionAmount,
     PreventionScope, PtValue, QuantityExpr, QuantityRef, SearchSelectionConstraint,
-    StaticDefinition, TargetFilter, TypedFilter,
+    StaticDefinition, TargetFilter, TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -1902,6 +1902,10 @@ pub(super) fn parse_choose_ast(
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<ChooseImperativeAst> {
+    if let Some(ast) = try_parse_choose_from_zone(lower, ctx) {
+        return Some(ast);
+    }
+
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("choose ")).parse(input))
     {
@@ -1962,6 +1966,108 @@ pub(super) fn parse_choose_ast(
     }
 
     None
+}
+
+fn try_parse_choose_from_zone(lower: &str, ctx: &mut ParseContext) -> Option<ChooseImperativeAst> {
+    type E<'a> = OracleError<'a>;
+
+    let (_, choice_text) = alt((
+        preceded(tag::<_, _, E>("choose "), rest),
+        preceded(tag("you choose "), rest),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    if nom_primitives::scan_contains(choice_text, "at random") {
+        return None;
+    }
+
+    let (filter_prefix, (zone_owner, zones), zone_suffix) =
+        nom_primitives::scan_preceded(choice_text, parse_choose_zone_connector)?;
+    if filter_prefix.trim().is_empty() {
+        return None;
+    }
+
+    let mut filter_text = strip_choose_article(filter_prefix.trim())?.to_string();
+    if !zone_suffix.trim().is_empty() {
+        filter_text.push(' ');
+        filter_text.push_str(zone_suffix.trim());
+    }
+
+    let filter = super::search::parse_search_filter(&filter_text, ctx);
+    Some(ChooseImperativeAst::FromZone {
+        count: 1,
+        zones,
+        zone_owner,
+        filter,
+        chooser: Chooser::Controller,
+        up_to: false,
+    })
+}
+
+fn strip_choose_article(input: &str) -> Option<&str> {
+    type E<'a> = OracleError<'a>;
+
+    alt((
+        preceded(tag::<_, _, E>("a "), rest),
+        preceded(tag("an "), rest),
+        preceded(tag("one "), rest),
+    ))
+    .parse(input)
+    .map(|(_, stripped)| stripped)
+    .ok()
+}
+
+fn parse_choose_zone_connector(
+    input: &str,
+) -> nom::IResult<&str, (ZoneOwner, Vec<Zone>), OracleError<'_>> {
+    type E<'a> = OracleError<'a>;
+
+    preceded(
+        alt((tag::<_, _, E>("in "), tag("from "))),
+        alt((
+            map(preceded(tag("your "), parse_choose_zone_list), |zones| {
+                (ZoneOwner::Controller, zones)
+            }),
+            map(
+                preceded(tag("that player's "), parse_choose_zone_list),
+                |zones| (ZoneOwner::TargetedPlayer, zones),
+            ),
+            map(
+                preceded(tag("target opponent's "), parse_choose_zone_list),
+                |zones| (ZoneOwner::TargetedPlayer, zones),
+            ),
+            map(
+                preceded(tag("an opponent's "), parse_choose_zone_list),
+                |zones| (ZoneOwner::Opponent, zones),
+            ),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_choose_zone_list(input: &str) -> nom::IResult<&str, Vec<Zone>, OracleError<'_>> {
+    type E<'a> = OracleError<'a>;
+
+    let (rest, first) = parse_choose_zone(input)?;
+    let (rest, second) = opt(preceded(tag::<_, _, E>(" or "), parse_choose_zone)).parse(rest)?;
+    let mut zones = vec![first];
+    if let Some(second) = second {
+        zones.push(second);
+    }
+    Ok((rest, zones))
+}
+
+fn parse_choose_zone(input: &str) -> nom::IResult<&str, Zone, OracleError<'_>> {
+    type E<'a> = OracleError<'a>;
+
+    alt((
+        value(Zone::Graveyard, tag::<_, _, E>("graveyard")),
+        value(Zone::Library, tag("library")),
+        value(Zone::Hand, tag("hand")),
+        value(Zone::Exile, tag("exile")),
+    ))
+    .parse(input)
 }
 
 /// CR 115.1c + CR 601.2c + CR 608.2c: Detect "target X and target Y" wording
@@ -2248,10 +2354,34 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         ChooseImperativeAst::FromTrackedSet { count, chooser } => Effect::ChooseFromZone {
             count,
             zone: Zone::Exile,
+            additional_zones: Vec::new(),
+            zone_owner: ZoneOwner::Controller,
+            filter: None,
             chooser,
             up_to: false,
             constraint: None,
         },
+        ChooseImperativeAst::FromZone {
+            count,
+            zones,
+            zone_owner,
+            filter,
+            chooser,
+            up_to,
+        } => {
+            let mut zones = zones.into_iter();
+            let zone = zones.next().unwrap_or(Zone::Hand);
+            Effect::ChooseFromZone {
+                count,
+                zone,
+                additional_zones: zones.collect(),
+                zone_owner,
+                filter: Some(filter),
+                chooser,
+                up_to,
+                constraint: None,
+            }
+        }
         // CR 101.4 + CR 701.21a: Multi-category permanent selection + sacrifice rest.
         ChooseImperativeAst::CategoryAndSacrificeRest {
             categories,
@@ -7486,6 +7616,88 @@ mod tests {
     }
 
     #[test]
+    fn parse_choose_creature_card_in_your_hand() {
+        let text = "choose a creature card in your hand";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::FromZone {
+                zones,
+                zone_owner,
+                filter,
+                ..
+            }) => {
+                assert_eq!(zones, vec![Zone::Hand]);
+                assert_eq!(zone_owner, ZoneOwner::Controller);
+                let TargetFilter::Typed(tf) = filter else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                };
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => panic!("Expected FromZone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_choose_instant_or_sorcery_card_in_hand_or_graveyard() {
+        let text = "choose an instant or sorcery card in your hand or graveyard";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::FromZone {
+                zones,
+                zone_owner,
+                filter,
+                ..
+            }) => {
+                assert_eq!(zones, vec![Zone::Hand, Zone::Graveyard]);
+                assert_eq!(zone_owner, ZoneOwner::Controller);
+                let TargetFilter::Or { filters } = filter else {
+                    panic!("expected Or instant/sorcery filter, got {filter:?}");
+                };
+                assert_eq!(filters.len(), 2);
+            }
+            other => panic!("Expected FromZone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_choose_targeted_players_graveyard_or_hand() {
+        let text = "you choose a nonland card from that player's graveyard or hand";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::FromZone {
+                zones,
+                zone_owner,
+                filter,
+                ..
+            }) => {
+                assert_eq!(zones, vec![Zone::Graveyard, Zone::Hand]);
+                assert_eq!(zone_owner, ZoneOwner::TargetedPlayer);
+                let TargetFilter::Typed(tf) = filter else {
+                    panic!("expected Typed nonland filter, got {filter:?}");
+                };
+                assert!(tf
+                    .type_filters
+                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+            }
+            other => panic!("Expected FromZone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_choose_random_card_in_graveyard_is_not_direct_choice() {
+        let text = "choose a card at random in your graveyard";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        assert!(
+            !matches!(result, Some(ChooseImperativeAst::FromZone { .. })),
+            "random choices must not become player-directed ChooseFromZone prompts"
+        );
+    }
+
+    #[test]
     fn parse_choose_creature_they_control() {
         // Imperial Edict pattern: "choose a creature they control"
         let text = "choose a creature they control";
@@ -7717,12 +7929,18 @@ mod tests {
             Effect::ChooseFromZone {
                 count,
                 zone,
+                additional_zones,
+                zone_owner,
+                filter,
                 chooser,
                 up_to,
                 constraint,
             } => {
                 assert_eq!(count, 3);
                 assert_eq!(zone, Zone::Exile);
+                assert!(additional_zones.is_empty());
+                assert_eq!(zone_owner, ZoneOwner::Controller);
+                assert!(filter.is_none());
                 assert_eq!(chooser, Chooser::Opponent);
                 assert!(!up_to);
                 assert!(constraint.is_none());

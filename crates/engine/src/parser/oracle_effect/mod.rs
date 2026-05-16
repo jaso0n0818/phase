@@ -2224,6 +2224,9 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
         effect: Effect::ChooseFromZone {
             count: categories.len() as u32,
             zone: Zone::Library,
+            additional_zones: Vec::new(),
+            zone_owner: crate::types::ability::ZoneOwner::Controller,
+            filter: None,
             chooser: crate::types::ability::Chooser::Controller,
             up_to: true,
             constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }),
@@ -7311,6 +7314,21 @@ fn lower_subject_predicate_ast(
                 });
             }
             let mut clause = lower_imperative_clause(&text, ctx);
+            if matches!(
+                &clause.effect,
+                Effect::ChooseFromZone {
+                    filter: Some(_),
+                    ..
+                }
+            ) && !matches!(
+                subject.affected,
+                TargetFilter::Controller | TargetFilter::SelfRef
+            ) {
+                return parsed_clause(Effect::Unimplemented {
+                    name: "choose".to_string(),
+                    description: Some(text.clone()),
+                });
+            }
             if let Some(player_target) = subject
                 .target
                 .as_ref()
@@ -10940,6 +10958,9 @@ pub(crate) fn parse_effect_chain_ir(
                         Some(Effect::ChooseFromZone {
                             count: *count,
                             zone: Zone::Exile,
+                            additional_zones: Vec::new(),
+                            zone_owner: crate::types::ability::ZoneOwner::Controller,
+                            filter: None,
                             chooser: *chooser,
                             up_to: false,
                             constraint: None,
@@ -10969,6 +10990,9 @@ pub(crate) fn parse_effect_chain_ir(
                             Effect::ChooseFromZone {
                                 count: *count,
                                 zone: Zone::Exile,
+                                additional_zones: Vec::new(),
+                                zone_owner: crate::types::ability::ZoneOwner::Controller,
+                                filter: None,
                                 chooser: *chooser,
                                 up_to: false,
                                 constraint: None,
@@ -22498,6 +22522,7 @@ mod tests {
                     chooser: crate::types::ability::Chooser::Controller,
                     up_to: false,
                     constraint: None,
+                    ..
                 }
             ),
             "Expected ChooseFromZone {{ count: 1, zone: Exile, chooser: Controller }}, got {:?}",
@@ -22521,6 +22546,31 @@ mod tests {
             ),
             "Expected GrantCastingPermission(PlayFromExile), got {:?}",
             sub2.effect
+        );
+    }
+
+    #[test]
+    fn subject_scoped_direct_zone_choice_stays_unimplemented() {
+        let def = parse_effect_chain(
+            "Choose a creature card in an opponent's graveyard, then that player chooses a creature card in your graveyard.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            &*def.effect,
+            Effect::ChooseFromZone {
+                zone: Zone::Graveyard,
+                zone_owner: crate::types::ability::ZoneOwner::Opponent,
+                ..
+            }
+        ));
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected subject choice sub");
+        assert!(
+            matches!(&*sub.effect, Effect::Unimplemented { .. }),
+            "subject-scoped chooser must not be misrouted to the controller, got {:?}",
+            sub.effect
         );
     }
 

@@ -783,6 +783,16 @@ pub(crate) enum ChooseImperativeAst {
         count: u32,
         chooser: crate::types::ability::Chooser,
     },
+    /// "choose a [filter] card in/from [player's] [zone]" — direct selection
+    /// from visible/resolution-scoped zone contents. Lowered to `Effect::ChooseFromZone`.
+    FromZone {
+        count: u32,
+        zones: Vec<crate::types::zones::Zone>,
+        zone_owner: crate::types::ability::ZoneOwner,
+        filter: crate::types::ability::TargetFilter,
+        chooser: crate::types::ability::Chooser,
+        up_to: bool,
+    },
     /// "choose from among the permanents ... an artifact, a creature, ..." —
     /// multi-category selection where each player keeps one per type, then sacrifices the rest.
     /// Lowered to `Effect::ChooseAndSacrificeRest`.

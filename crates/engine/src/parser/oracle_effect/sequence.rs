@@ -1320,6 +1320,9 @@ pub(super) fn apply_clause_continuation(
                 Effect::ChooseFromZone {
                     count,
                     zone: Zone::Exile,
+                    additional_zones: Vec::new(),
+                    zone_owner: crate::types::ability::ZoneOwner::Controller,
+                    filter: None,
                     chooser,
                     up_to: false,
                     constraint: None,
@@ -3344,6 +3347,9 @@ mod tests {
         let choose = Effect::ChooseFromZone {
             count: 2,
             zone: Zone::Exile,
+            additional_zones: Vec::new(),
+            zone_owner: crate::types::ability::ZoneOwner::Controller,
+            filter: None,
             chooser: Chooser::Opponent,
             up_to: false,
             constraint: None,
@@ -3367,6 +3373,9 @@ mod tests {
         let choose = Effect::ChooseFromZone {
             count: 2,
             zone: Zone::Exile,
+            additional_zones: Vec::new(),
+            zone_owner: crate::types::ability::ZoneOwner::Controller,
+            filter: None,
             chooser: Chooser::Opponent,
             up_to: false,
             constraint: None,
