@@ -62,5 +62,6 @@ mod tyvar_activate_as_though_haste;
 mod ureni_attack_trigger;
 mod urzas_saga_chapter_two;
 mod virulent_emissary_trigger;
+mod volatile_fault_that_player_search;
 mod wedding_ring_etb_token_copy;
 mod wise_mothman_milled_trigger;
