@@ -1284,7 +1284,7 @@ fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProperty> {
 /// grammar (not a CR rule): GT/GE compare against the Max of the population
 /// (∃ object with greater property than each ⟺ subject > Max of others);
 /// LT/LE compare against Min.
-fn parse_superlative_comparator_phrase(
+pub(crate) fn parse_superlative_comparator_phrase(
     input: &str,
 ) -> OracleResult<'_, (Comparator, AggregateFunction)> {
     // Order matters: longer phrases ("greater than or equal to") must precede
@@ -2111,6 +2111,7 @@ fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
             LifeTotalScope::Controller => PlayerScope::Controller,
             LifeTotalScope::AllPlayers => PlayerScope::AllPlayers {
                 aggregate: existential_aggregate(comparator),
+                exclude: None,
             },
             LifeTotalScope::Opponent => PlayerScope::Opponent {
                 aggregate: existential_aggregate(comparator),
@@ -3141,6 +3142,7 @@ fn parse_player_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCondi
             QuantityRef::LifeLostThisTurn {
                 player: PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Max,
+                    exclude: None,
                 },
             },
             n,
@@ -6196,6 +6198,7 @@ mod tests {
                                 player:
                                     PlayerScope::AllPlayers {
                                         aggregate: AggregateFunction::Min,
+                                        exclude: None,
                                     },
                             },
                     },
@@ -6273,6 +6276,7 @@ mod tests {
                     qty: QuantityRef::LifeTotal {
                         player: PlayerScope::AllPlayers {
                             aggregate: AggregateFunction::Min,
+                            exclude: None,
                         },
                     },
                 },
@@ -8251,6 +8255,7 @@ mod tests {
                     qty: QuantityRef::LifeLostThisTurn {
                         player: PlayerScope::AllPlayers {
                             aggregate: AggregateFunction::Max,
+                            exclude: None,
                         },
                     },
                 },
@@ -8294,6 +8299,7 @@ mod tests {
                     qty: QuantityRef::LifeLostThisTurn {
                         player: PlayerScope::AllPlayers {
                             aggregate: AggregateFunction::Max,
+                            exclude: None,
                         },
                     },
                 },
@@ -8318,6 +8324,7 @@ mod tests {
                     qty: QuantityRef::LifeLostThisTurn {
                         player: PlayerScope::AllPlayers {
                             aggregate: AggregateFunction::Max,
+                            exclude: None,
                         },
                     },
                 },

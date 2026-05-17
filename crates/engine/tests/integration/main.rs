@@ -48,6 +48,7 @@ mod riot_control_regression;
 mod ripples_of_undeath_regression;
 mod roots_of_wisdom_if_you_cant_draw;
 mod rules;
+mod spikeshell_harrier_speed_superlative;
 mod springheart_nantuko_bestow_landfall;
 mod swans_prevention_followup;
 mod talon_gates_from_hand_activation;
