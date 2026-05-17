@@ -675,13 +675,16 @@ fn parse_mana_spent_to_cast_amount(input: &str) -> Option<QuantityRef> {
 }
 
 /// CR 603.7c: Check if a possessive prefix refers to the triggering event's source object.
-/// Matches event-context anaphoric referents like "the sacrificed creature", "that spell", etc.
+/// Matches event-context anaphoric referents like "the destroyed creature", "that spell", etc.
+///
+/// Note: `sacrificed`/`exiled`/`discarded` participle-possessives are deliberately
+/// NOT here — those refer to a *cost-paid object* (CR 608.2k), not an event-context
+/// source. Excluding them lets the possessive block fall through to
+/// `parse_quantity_ref` → `parse_cost_paid_object_ref`, which yields
+/// `Power { ObjectScope::CostPaidObject }` (Greater Good, issue #338).
 fn is_event_context_referent(prefix: &str) -> bool {
     let event_adjectives = [
-        "sacrificed",
         "destroyed",
-        "exiled",
-        "discarded",
         "countered",
         "returned",
         "targeted",
@@ -1999,12 +2002,31 @@ mod tests {
         );
     }
 
+    // Issue #338: `sacrificed`/`exiled`/`discarded` participle-possessives are
+    // cost-paid-object referents (CR 608.2k), not event-context referents.
+    // They must fall through `parse_event_context_quantity`'s possessive block
+    // to the `parse_quantity_ref` → `parse_cost_paid_object_ref` fallback,
+    // yielding `ObjectScope::CostPaidObject`-scoped refs.
     #[test]
     fn parse_event_context_possessive_sacrificed_creature_power() {
         assert_eq!(
             parse_event_context_quantity("the sacrificed creature's power"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourcePower
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_possessive_sacrificed_creature_toughness() {
+        assert_eq!(
+            parse_event_context_quantity("the sacrificed creature's toughness"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject
+                }
             })
         );
     }
@@ -2024,7 +2046,21 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the exiled card's mana value"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceManaValue
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_possessive_discarded_creature_power() {
+        assert_eq!(
+            parse_event_context_quantity("the discarded creature's power"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject
+                }
             })
         );
     }

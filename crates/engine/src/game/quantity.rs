@@ -2168,8 +2168,21 @@ where
                 .or_else(|| state.lki_cache.get(&object_id).and_then(&lki_extract))
                 .unwrap_or(0)
         }
+        // CR 608.2k: An ability's effect referring to a specific untargeted
+        // object previously referred to by that ability's cost still affects
+        // it. The "cost-paid object" power/toughness reads `cost_paid_object`
+        // first — the canonical referent for activated/cast sacrifice costs
+        // (Greater Good) — then falls back to `effect_context_object` for
+        // effect-driven sacrifices captured mid-resolution (Fire Lord Ozai,
+        // The Meep, Venom, Broadside Bombardiers). Exact parity with the
+        // `resolve_object_mana_value` `CostPaidObject` arm.
         ObjectScope::CostPaidObject => ability
-            .and_then(|ability| ability.cost_paid_object.as_ref())
+            .and_then(|ability| {
+                ability
+                    .cost_paid_object
+                    .as_ref()
+                    .or(ability.effect_context_object.as_ref())
+            })
             .and_then(|snapshot| lki_extract(&snapshot.lki))
             .unwrap_or(0),
     }
@@ -6367,5 +6380,152 @@ mod tests {
         let expr = QuantityExpr::Ref { qty: aggregate };
         // Triggering creature (power 6) must be excluded; max of remaining is 4.
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 4);
+    }
+
+    /// Issue #338 — Greater Good end-to-end. Drives the REAL engine pipeline:
+    /// parse the card from Oracle text, activate `Sacrifice a creature: Draw
+    /// cards equal to the sacrificed creature's power`, sacrifice a 4/4, and
+    /// resolve. Two assertions discriminate the fix:
+    ///
+    /// 1. **Parser** — the draw quantity must parse to
+    ///    `Power { ObjectScope::CostPaidObject }`, NOT `EventContextSourcePower`.
+    ///    This assertion FAILS on pre-fix code, where the participle-possessive
+    ///    "the sacrificed creature's power" was mis-classified as an
+    ///    event-context referent.
+    /// 2. **Runtime** — driving the engine through `apply_as_current`, exactly
+    ///    4 cards (the sacrificed 4/4's power) are drawn before the sub-ability
+    ///    discards 3.
+    ///
+    /// CR 608.2k: the sacrificed creature is a specific untargeted object
+    /// previously referred to by the ability's cost.
+    #[test]
+    fn greater_good_draws_equal_to_sacrificed_creature_power_end_to_end() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        // Greater Good is an enchantment; modeled here as a permanent carrying
+        // the activated ability parsed from its real Oracle text.
+        let greater_good = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Greater Good",
+                0,
+                0,
+                "Sacrifice a creature: Draw cards equal to the sacrificed \
+                 creature's power, then discard three cards.",
+            )
+            .id();
+
+        // The creature to sacrifice — a 4/4. Its power (4) is the draw count.
+        let victim = scenario.add_creature(P0, "Sacrificial Ox", 4, 4).id();
+
+        // Library must hold enough cards for the draw to be observable.
+        scenario.with_library_top(P0, &["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"]);
+
+        let mut runner = scenario.build();
+
+        // The draw quantity must have parsed through the cost-paid-object
+        // chain — NOT EventContextSourcePower. This is the discriminating
+        // assertion that fails on pre-fix code.
+        let draw_count = {
+            let gg = &runner.state().objects[&greater_good];
+            let ability = gg
+                .abilities
+                .iter()
+                .find(|a| matches!(*a.effect, Effect::Draw { .. }))
+                .expect("Greater Good must parse a Draw activated ability");
+            match &*ability.effect {
+                Effect::Draw { count, .. } => count.clone(),
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(
+            draw_count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            },
+            "Greater Good's draw quantity must route through \
+             parse_cost_paid_object_ref → Power{{CostPaidObject}}, not \
+             EventContextSourcePower (issue #338)"
+        );
+
+        let hand_count = |runner: &crate::game::scenario::GameRunner| {
+            runner
+                .state()
+                .players
+                .iter()
+                .find(|p| p.id == P0)
+                .map(|p| p.hand.len())
+                .unwrap()
+        };
+        let hand_before = hand_count(&runner);
+
+        // Activate the sacrifice ability.
+        let ability_index = runner.state().objects[&greater_good]
+            .abilities
+            .iter()
+            .position(|a| matches!(*a.effect, Effect::Draw { .. }))
+            .unwrap();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: greater_good,
+                ability_index,
+            })
+            .expect("activation must succeed");
+
+        // CR 701.21a: paying a "sacrifice a creature" activation cost requires
+        // the controller to choose which permanent to sacrifice.
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::SacrificeForCost { .. }
+            ),
+            "activating a sacrifice-cost ability must prompt for the permanent"
+        );
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![victim],
+            })
+            .expect("sacrifice selection must succeed");
+
+        // Resolve everything on the stack.
+        // Resolve the Draw, stopping at the discard-choice prompt (the "then
+        // discard three cards" sub-ability requires the controller to pick
+        // cards). The discriminating signal is the draw count, so the test
+        // asserts the hand at the moment the draw has fully resolved.
+        for _ in 0..40 {
+            match runner.state().waiting_for {
+                WaitingFor::DiscardChoice { .. } => break,
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                _ => {}
+            }
+            if runner.act(GameAction::PassPriority).is_err() {
+                break;
+            }
+        }
+
+        // The 4/4 was sacrificed → exactly 4 cards drawn (its power). On
+        // pre-fix code the quantity mis-classified to EventContextSourcePower;
+        // the parser assertion above is the primary discriminator, this
+        // confirms the value resolves correctly end-to-end.
+        let hand_after = hand_count(&runner);
+        assert_eq!(
+            hand_after,
+            hand_before + 4,
+            "Greater Good must draw exactly 4 cards equal to the sacrificed \
+             4/4's power (hand before {hand_before}, after {hand_after})"
+        );
+        // The sacrificed creature must have left the battlefield.
+        assert!(
+            !runner.state().battlefield.contains(&victim),
+            "the sacrificed creature must have left the battlefield"
+        );
     }
 }
