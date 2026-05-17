@@ -173,7 +173,7 @@ pub(crate) fn target_filter_controller_scope(filter: &TargetFilter) -> Option<Co
     }
 }
 
-fn matches_player_scope(
+pub(crate) fn matches_player_scope(
     state: &GameState,
     player: PlayerId,
     scope: &PlayerFilter,

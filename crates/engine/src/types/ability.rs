@@ -2965,10 +2965,12 @@ pub enum PlayerRelation {
 }
 
 /// A filter matching players by game-state conditions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PlayerFilter {
     /// The controller of the effect or quantity.
+    /// CR 700.2a: the default chooser for any modal/effect player reference.
+    #[default]
     Controller,
     /// All opponents of the controller.
     Opponent,
@@ -7200,6 +7202,10 @@ pub struct ModalChoice {
     /// CR 702.42a: Entwine cost — when all modes are chosen, this additional cost is paid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entwine_cost: Option<ManaCost>,
+    /// CR 700.2e: The player who chooses the mode(s). Defaults to the
+    /// controller (CR 700.2a) for all standard modal spells/abilities.
+    #[serde(default = "default_player_filter_controller")]
+    pub chooser: PlayerFilter,
 }
 
 /// Selection constraints attached to a modal choice header.
