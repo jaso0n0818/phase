@@ -9348,6 +9348,170 @@ mod tests {
             )
     }
 
+    /// Issue #501 FOLLOW-UP — ROOT CAUSE A behavioral discriminator. Drives the
+    /// REAL Jhoira of the Ghitu card through `apply()`: activate the ability,
+    /// pay `{2}` + exile a nonland from hand, resolve, then advance real turn /
+    /// phase progression to PlayerId(0)'s next upkeep. The granted Suspend must
+    /// still be effective on the exiled card AND the synthesized off-zone
+    /// upkeep trigger must tick the time counter 4 → 3.
+    ///
+    /// Reverted-fix discriminator: before Fix A the suspend-grant `GenericEffect`
+    /// has `duration: None`, which `effect.rs` defaults to `UntilEndOfTurn`.
+    /// The grant expires at the end of the activation turn, the exiled card
+    /// loses Suspend before its first upkeep, no upkeep trigger is synthesized,
+    /// and the counter stays at 4 — both assertions below fail.
+    #[test]
+    fn jhoira_granted_suspend_persists_and_ticks_across_upkeep() {
+        use super::super::engine::apply_as_current;
+        use crate::types::counter::CounterType;
+
+        let mut state = setup_game_at_main_phase();
+        // CR 104.3c: stock both libraries so neither player decks out while the
+        // test drives real turn progression to the next upkeep.
+        for player in [PlayerId(0), PlayerId(1)] {
+            for i in 0..12u64 {
+                create_object(
+                    &mut state,
+                    CardId(4000 + u64::from(player.0) * 100 + i),
+                    player,
+                    format!("Library Filler {}-{i}", player.0),
+                    Zone::Library,
+                );
+            }
+        }
+        let jhoira = create_object(
+            &mut state,
+            CardId(990),
+            PlayerId(0),
+            "Jhoira of the Ghitu".to_string(),
+            Zone::Battlefield,
+        );
+        let nonland = create_object(
+            &mut state,
+            CardId(991),
+            PlayerId(0),
+            "Eligible Sorcery".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&jhoira).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                "{2}, Exile a nonland card from your hand: Put four time \
+                 counters on the exiled card. If it doesn't have suspend, it \
+                 gains suspend.",
+                "Jhoira of the Ghitu",
+                &[],
+                &[String::from("Creature")],
+                &[],
+            );
+            Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+        }
+        {
+            let nl = state.objects.get_mut(&nonland).unwrap();
+            nl.card_types.core_types.push(CoreType::Sorcery);
+            nl.base_card_types = nl.card_types.clone();
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: jhoira,
+                ability_index: 0,
+            },
+        )
+        .expect("Jhoira's exile-cost ability must enter the activation pipeline");
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![nonland],
+            },
+        )
+        .expect("paying the exile-from-hand cost must succeed");
+        stack::resolve_top(&mut state, &mut Vec::new());
+
+        assert_eq!(
+            state.objects[&nonland]
+                .counters
+                .get(&CounterType::Time)
+                .copied(),
+            Some(4),
+            "the exiled card must start with four time counters"
+        );
+
+        // Drive real turn/phase progression to PlayerId(0)'s next upkeep.
+        let start_turn = state.turn_number;
+        let mut guard = 0;
+        loop {
+            guard += 1;
+            assert!(guard < 300, "turn progression stalled before P0's upkeep");
+            if state.phase == Phase::Upkeep
+                && state.active_player == PlayerId(0)
+                && state.turn_number > start_turn
+            {
+                break;
+            }
+            if !state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                apply_as_current(&mut state, GameAction::PassPriority)
+                    .expect("priority pass to resolve stack");
+                continue;
+            }
+            match &state.waiting_for {
+                WaitingFor::Priority { .. } => {
+                    apply_as_current(&mut state, GameAction::PassPriority)
+                        .expect("priority pass to advance the turn");
+                }
+                WaitingFor::DeclareAttackers { .. } => {
+                    apply_as_current(&mut state, GameAction::DeclareAttackers { attacks: vec![] })
+                        .expect("declare no attackers");
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    apply_as_current(
+                        &mut state,
+                        GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        },
+                    )
+                    .expect("declare no blockers");
+                }
+                other => panic!("unexpected waiting state during turn progression: {other:?}"),
+            }
+        }
+
+        // Root Cause A discriminator: the granted Suspend survived the turn
+        // boundary (Fix A: Duration::Permanent). Without the fix the keyword
+        // expired at end of the activation turn.
+        assert!(
+            crate::game::keywords::object_has_effective_keyword_kind(
+                &state,
+                nonland,
+                crate::types::keywords::KeywordKind::Suspend,
+            ),
+            "the granted Suspend must persist past the activation turn \
+             (issue #501 follow-up, Root Cause A)"
+        );
+
+        // Resolve the synthesized off-zone Suspend upkeep trigger off the stack.
+        let mut guard = 0;
+        while !state.stack.is_empty() {
+            guard += 1;
+            assert!(guard < 20, "upkeep-trigger stack failed to drain");
+            apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("resolve the suspend upkeep trigger");
+        }
+
+        assert_eq!(
+            state.objects[&nonland]
+                .counters
+                .get(&CounterType::Time)
+                .copied(),
+            Some(3),
+            "the persisting granted Suspend must let the upkeep trigger \
+             tick the time counter 4 → 3 (issue #501 follow-up, Root Cause A)"
+        );
+    }
+
     /// Building-block test for `TargetFilter::CostPaidObject` as an effect
     /// target: a `PutCounter` whose target is `CostPaidObject` resolves the
     /// counters onto `ability.cost_paid_object`, independent of any card.

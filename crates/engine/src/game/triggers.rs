@@ -10787,6 +10787,19 @@ pub mod tests {
             nl.card_types.core_types.push(CoreType::Sorcery);
             nl.base_card_types = nl.card_types.clone();
         }
+        // CR 104.3c: stock both libraries so neither player decks out while the
+        // combined A+B assertion drives real turn progression to the next upkeep.
+        for player in [PlayerId(0), PlayerId(1)] {
+            for i in 0..12u64 {
+                create_object(
+                    &mut state,
+                    CardId(7100 + u64::from(player.0) * 100 + i),
+                    player,
+                    format!("Library Filler {}-{i}", player.0),
+                    Zone::Library,
+                );
+            }
+        }
 
         // Declare the Tenth Doctor attacking the opponent.
         crate::game::engine::apply_as_current(
@@ -10858,16 +10871,106 @@ pub mod tests {
              for the library-exiled card (issue #501 class coverage)"
         );
 
-        // NOTE: A separate, pre-existing bug (NOT #501) prevents asserting the
-        // time-counter count here. The Tenth Doctor's "Put three time counters
-        // on it" parses the anaphor "it" as `TargetFilter::SelfRef`, which
-        // `counters::resolve_defined_or_targets` resolves to the trigger source
-        // (the Tenth Doctor itself) rather than the `ExileFromTopUntil`-injected
-        // hit card. The companion `AddKeyword{Suspend}` correctly uses
-        // `ParentTarget` and so lands on the exiled card — which is why the
-        // granted-Suspend assertions above hold. The mis-targeted `PutCounter`
-        // is tracked as an adjacent finding for follow-up; #501's deliverable
-        // (granted-Suspend trigger installation) is fully exercised above.
+        // #501 FOLLOW-UP — ROOT CAUSE B discriminator (CR 608.2c + CR 122):
+        // "Put three time counters on it" — the anaphor "it" binds to the
+        // ExileFromTopUntil-introduced hit card, NOT the trigger source. The
+        // `has_typed_target` arm for `ExileFromTopUntil { NextMatches }` routes
+        // the `PutCounter` clause through `replace_target_with_parent`, rewriting
+        // `target` SelfRef → ParentTarget so the resolver's injected `sub_clone.
+        // targets` (the exiled card) receives the counters. Reverted-fix
+        // discriminator: without the `has_typed_target` arm the clause keeps
+        // `target: SelfRef`, the 3 counters land on the Doctor, and these two
+        // assertions fail (exiled card gets 0, Doctor gets 3).
+        assert_eq!(
+            state.objects[&nonland]
+                .counters
+                .get(&CounterType::Time)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "Allons-y!'s 'put three time counters on it' must land on the \
+             exiled card (issue #501 follow-up, Root Cause B)"
+        );
+        assert_eq!(
+            state.objects[&doctor]
+                .counters
+                .get(&CounterType::Time)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "the time counters must NOT land on The Tenth Doctor itself \
+             (anaphoric 'it' mis-target — issue #501 follow-up, Root Cause B)"
+        );
+
+        // #501 FOLLOW-UP — A + B COMBINED: drive real turn progression to
+        // PlayerId(0)'s next upkeep. The granted Suspend (Root Cause A:
+        // Duration::Permanent) must persist past the activation turn, and the
+        // synthesized off-zone upkeep trigger must tick the time counter that
+        // Root Cause B's fix placed on the exiled card (3 → 2). This proves the
+        // real Tenth Doctor card functions end-to-end with both fixes.
+        let start_turn = state.turn_number;
+        let mut guard = 0;
+        loop {
+            guard += 1;
+            assert!(guard < 300, "turn progression stalled before P0's upkeep");
+            if state.phase == Phase::Upkeep
+                && state.active_player == PlayerId(0)
+                && state.turn_number > start_turn
+            {
+                break;
+            }
+            if !state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                    .expect("priority pass to resolve stack");
+                continue;
+            }
+            match &state.waiting_for {
+                WaitingFor::Priority { .. } => {
+                    crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                        .expect("priority pass to advance the turn");
+                }
+                WaitingFor::DeclareAttackers { .. } => {
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::DeclareAttackers { attacks: vec![] },
+                    )
+                    .expect("declare no attackers");
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        },
+                    )
+                    .expect("declare no blockers");
+                }
+                other => panic!("unexpected waiting state during turn progression: {other:?}"),
+            }
+        }
+        assert!(
+            crate::game::off_zone_characteristics::effective_off_zone_keywords(&state, nonland)
+                .iter()
+                .any(|k| k.kind() == crate::types::keywords::KeywordKind::Suspend),
+            "granted Suspend must persist past the activation turn (Root Cause A)"
+        );
+        let mut guard = 0;
+        while !state.stack.is_empty() {
+            guard += 1;
+            assert!(guard < 20, "upkeep-trigger stack failed to drain");
+            crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("resolve the suspend upkeep trigger");
+        }
+        assert_eq!(
+            state.objects[&nonland]
+                .counters
+                .get(&CounterType::Time)
+                .copied()
+                .unwrap_or(0),
+            2,
+            "the upkeep trigger must tick the exiled card's time counter 3 → 2 \
+             (issue #501 follow-up, A + B combined)"
+        );
     }
 
     /// RUNTIME TEST — issue #411. Drives Syr Konrad's `{1}{B}: Each player mills

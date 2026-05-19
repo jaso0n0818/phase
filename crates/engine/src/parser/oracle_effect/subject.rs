@@ -1237,6 +1237,26 @@ fn build_continuous_clause(
         return None;
     }
 
+    // CR 702.62b + CR 611.2a + CR 611.2c: A "gains suspend" grant onto an exiled
+    // card has no turn-scoped expiry — a card stays suspended (exiled, has suspend,
+    // has a time counter) until its last time counter is removed (CR 702.62b). CR
+    // 611.2a: a continuous effect with no stated duration lasts until end of game.
+    // Unlike an ordinary "gains <keyword>" combat trick (correctly UntilEndOfTurn
+    // via the chain default in effect.rs), the suspend grant's lifetime is owned by
+    // the suspend mechanic, so its parsed duration is Permanent. Keyed on the typed
+    // Keyword::Suspend variant — never a string. Mirrors the build_become_clause
+    // precedent (CR 611.2b default-permanent).
+    let duration = if matches!(
+        modifications.as_slice(),
+        [ContinuousModification::AddKeyword {
+            keyword: crate::types::keywords::Keyword::Suspend { .. },
+        }]
+    ) {
+        Some(Duration::Permanent)
+    } else {
+        duration
+    };
+
     if let Some((power, toughness)) = extract_pump_modifiers(&modifications) {
         let effect = build_pump_effect(&application, power, toughness);
         return Some(ParsedEffectClause {

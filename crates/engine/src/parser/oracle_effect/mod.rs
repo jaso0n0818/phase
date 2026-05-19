@@ -7234,6 +7234,17 @@ fn has_typed_target(effect: &Effect) -> bool {
             target: TargetFilter::Typed(_),
             ..
         }
+        // CR 608.2c + CR 701.57a / CR 702.85a: An `ExileFromTopUntil { NextMatches }`
+        // introduces a single object (the just-exiled matching card) that the resolver
+        // threads into the sub-ability chain (exile_from_top_until.rs sub_clone.targets).
+        // A following sibling clause's bare anaphor "it" ("Put three time counters on it")
+        // binds to that object, so this prior clause counts as object-introducing for the
+        // chunk-loop `replace_target_with_parent` rewrite. CumulativeThreshold is excluded
+        // — it introduces a card *set*, not a single referent.
+        | Effect::ExileFromTopUntil {
+            until: UntilCondition::NextMatches { .. },
+            ..
+        }
     )
 }
 
@@ -20100,6 +20111,70 @@ mod tests {
         ));
     }
 
+    /// Issue #501 FOLLOW-UP — ROOT CAUSE A building-block test. A "gains
+    /// suspend" continuous keyword grant carries `Duration::Permanent` (CR
+    /// 702.62b + CR 611.2a): the suspend mechanic owns the card's lifetime, so
+    /// the grant has no turn-scoped expiry. Keyed on the typed `Keyword::Suspend`
+    /// variant in `build_continuous_clause`.
+    #[test]
+    fn suspend_keyword_grant_carries_permanent_duration() {
+        use crate::types::keywords::Keyword;
+        let def = parse_effect_chain(
+            "If it doesn't have suspend, it gains suspend",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(
+                    *duration,
+                    Some(Duration::Permanent),
+                    "suspend grant's GenericEffect must be Permanent, not turn-scoped"
+                );
+                assert!(
+                    static_abilities
+                        .iter()
+                        .any(|s| s.modifications.iter().any(|m| matches!(
+                            m,
+                            ContinuousModification::AddKeyword {
+                                keyword: Keyword::Suspend { .. }
+                            }
+                        ))),
+                    "the grant must add the Suspend keyword"
+                );
+            }
+            other => panic!("suspend grant must be a GenericEffect, got {other:?}"),
+        }
+        assert_eq!(
+            def.duration,
+            Some(Duration::Permanent),
+            "the ParsedEffectClause duration must also be Permanent"
+        );
+    }
+
+    /// Issue #501 FOLLOW-UP — negative sibling for Root Cause A. The
+    /// `Duration::Permanent` override is keyed strictly on `Keyword::Suspend`:
+    /// an ordinary "gains flying" combat trick still parses to
+    /// `Some(UntilEndOfTurn)` (recovered from the explicit duration suffix), so
+    /// the suspend-specific override does not leak to other keyword grants.
+    #[test]
+    fn non_suspend_keyword_grant_is_not_made_permanent() {
+        let e = parse_effect("Target creature gains flying until end of turn");
+        match e {
+            Effect::GenericEffect { duration, .. } => {
+                assert_eq!(
+                    duration,
+                    Some(Duration::UntilEndOfTurn),
+                    "ordinary keyword grants must stay turn-scoped"
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
     /// CR 508.1d / CR 509.1c: Deadly Allure — "Target creature gains deathtouch
     /// until end of turn and must be blocked this turn if able." The trailing
     /// combat-requirement conjunct splits into a second chained `GenericEffect`,
@@ -30559,6 +30634,58 @@ mod tests {
             assert_eq!(*count, QuantityExpr::Fixed { value: 0 });
             assert_eq!(*position, LibraryPosition::Bottom);
         }
+    }
+
+    /// Issue #501 FOLLOW-UP — ROOT CAUSE B building-block test. After an
+    /// `ExileFromTopUntil { NextMatches }` clause, a following sibling clause's
+    /// bare anaphor "it" ("Put three time counters on it") binds to the
+    /// exiled hit card. The `has_typed_target` arm for `ExileFromTopUntil
+    /// { NextMatches }` routes the `PutCounter` clause through
+    /// `replace_target_with_parent`, rewriting `target` SelfRef → ParentTarget
+    /// (CR 608.2c). Without the arm the `PutCounter` keeps `SelfRef`.
+    #[test]
+    fn put_counter_it_after_exile_from_top_until_resolves_to_parent_target() {
+        let def = parse_effect_chain(
+            "Exile cards from the top of your library until you exile a nonland card. Put three time counters on it.",
+            AbilityKind::Spell,
+        );
+        let Effect::ExileFromTopUntil { until, .. } = &*def.effect else {
+            panic!("expected ExileFromTopUntil, got {:?}", def.effect);
+        };
+        assert!(matches!(until, UntilCondition::NextMatches { .. }));
+        let put_counter = def
+            .sub_ability
+            .as_deref()
+            .expect("the 'put counters on it' clause must chain as a sub_ability");
+        let Effect::PutCounter { target, .. } = &*put_counter.effect else {
+            panic!(
+                "expected PutCounter sub-ability, got {:?}",
+                put_counter.effect
+            );
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::ParentTarget,
+            "'it' after an ExileFromTopUntil must bind to the exiled card, not SelfRef"
+        );
+    }
+
+    /// Issue #501 FOLLOW-UP — negative sibling for Root Cause B. The
+    /// `has_typed_target` arm is scoped to the `ExileFromTopUntil { NextMatches }`
+    /// prior-sibling case: an ordinary self-trigger "put a +1/+1 counter on it"
+    /// (no object-introducing prior clause) still resolves "it" to `SelfRef`,
+    /// so the new arm does not capture ordinary self-trigger anaphora.
+    #[test]
+    fn put_counter_it_without_exile_prior_clause_stays_self_ref() {
+        let def = parse_effect_chain("Put a +1/+1 counter on it", AbilityKind::Spell);
+        let Effect::PutCounter { target, .. } = &*def.effect else {
+            panic!("expected PutCounter, got {:?}", def.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::SelfRef,
+            "a bare 'it' with no object-introducing prior clause must stay SelfRef"
+        );
     }
 
     /// CR 603.2 + CR 701.57a + CR 702.85a + CR 608.2: Etali's outer ETB trigger
