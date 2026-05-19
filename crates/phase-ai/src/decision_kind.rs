@@ -57,6 +57,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // tactical policy currently routes on. Map them to ActivateAbility as
         // the catch-all bucket so policies that explicitly opt in still run.
         WaitingFor::ReplacementChoice { .. }
+        | WaitingFor::OrderTriggers { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::EquipTarget { .. }
@@ -88,6 +89,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::AdventureCastChoice { .. }
         | WaitingFor::ModalFaceChoice { .. }
         | WaitingFor::AlternativeCastChoice { .. }
+        | WaitingFor::CastingVariantChoice { .. }
         | WaitingFor::ChoosePermanentTypeSlot { .. }
         | WaitingFor::ChooseRingBearer { .. }
         | WaitingFor::ChooseDungeon { .. }

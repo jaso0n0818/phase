@@ -399,6 +399,11 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // Replacement choice: pick the first option.
         WaitingFor::ReplacementChoice { .. } => Some(GameAction::ChooseReplacement { index: 0 }),
 
+        // Trigger order: keep the engine-provided order.
+        WaitingFor::OrderTriggers { triggers, .. } => Some(GameAction::OrderTriggers {
+            order: (0..triggers.len()).collect(),
+        }),
+
         // CR 103.5 + 103.5b: Mulligan default = keep, unless the AI has a
         // Serum Powder in hand, in which case use it first (auto-heuristic —
         // see `first_serum_powder_in_hand`).
@@ -478,6 +483,9 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::AlternativeCastChoice { .. } => Some(GameAction::ChooseAlternativeCast {
             choice: AlternativeCastDecision::Normal,
         }),
+        WaitingFor::CastingVariantChoice { options, .. } => {
+            (!options.is_empty()).then_some(GameAction::ChooseCastingVariant { index: 0 })
+        }
         WaitingFor::ChoosePermanentTypeSlot {
             available_slots, ..
         } => available_slots

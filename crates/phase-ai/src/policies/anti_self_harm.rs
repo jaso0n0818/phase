@@ -134,8 +134,24 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
         }
     }
 
+    // ETB-only permanents (e.g. Gravedigger): the spell itself has no targets,
+    // but the card's value may come from a targeted ETB trigger. If no valid
+    // target exists for that ETB trigger, casting wastes the card.
+    let etb_whiff_penalty = if let Some(facts) = ctx.cast_facts() {
+        if facts.requires_targets_in_immediate_etb
+            && !facts.requires_targets_in_spell_text
+            && !etb_trigger_has_valid_targets(ctx, &facts)
+        {
+            -8.0
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
     if !has_beneficial_creature_target && !has_harmful_creature_only_target && !has_harmful_bounce {
-        return legend_penalty;
+        return legend_penalty + etb_whiff_penalty;
     }
 
     let has_own_creature = ctx.state.battlefield.iter().any(|&id| {
@@ -172,17 +188,7 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
         penalty -= 8.0;
     }
 
-    // ETB-only permanents (e.g. Seam Rip): the spell itself has no targets, but the
-    // card's entire value comes from a targeted ETB trigger. If no valid target exists
-    // for the ETB trigger, casting wastes the card.
-    if let Some(facts) = ctx.cast_facts() {
-        if facts.requires_targets_in_immediate_etb
-            && !facts.requires_targets_in_spell_text
-            && !etb_trigger_has_valid_targets(ctx, &facts)
-        {
-            penalty -= 8.0;
-        }
-    }
+    penalty += etb_whiff_penalty;
 
     penalty += legend_penalty;
 
@@ -271,12 +277,10 @@ fn etb_trigger_has_valid_targets(
         let mut node = Some(execute.as_ref());
         while let Some(def) = node {
             if let Some(filter) = extract_target_filter(&def.effect) {
-                // Check if any battlefield object matches this filter
                 let filter_ctx = FilterContext::from_source(ctx.state, source_id);
-                let has_match =
-                    ctx.state.battlefield.iter().any(|&obj_id| {
-                        matches_target_filter(ctx.state, obj_id, filter, &filter_ctx)
-                    });
+                let has_match = target_candidate_ids(ctx.state, &def.effect, filter)
+                    .into_iter()
+                    .any(|obj_id| matches_target_filter(ctx.state, obj_id, filter, &filter_ctx));
                 if has_match {
                     return true;
                 }
@@ -286,6 +290,54 @@ fn etb_trigger_has_valid_targets(
     }
 
     false
+}
+
+fn target_candidate_ids(
+    state: &GameState,
+    effect: &Effect,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    let mut zones = filter.extract_zones();
+    if zones.is_empty() {
+        if let Effect::ChangeZone {
+            origin: Some(origin),
+            ..
+        } = effect
+        {
+            zones.push(*origin);
+        } else {
+            zones.push(Zone::Battlefield);
+        }
+    }
+
+    let mut ids = Vec::new();
+    for zone in zones {
+        match zone {
+            Zone::Battlefield => ids.extend(state.battlefield.iter().copied()),
+            Zone::Exile => ids.extend(state.exile.iter().copied()),
+            Zone::Command => ids.extend(state.command_zone.iter().copied()),
+            Zone::Graveyard => ids.extend(
+                state
+                    .players
+                    .iter()
+                    .flat_map(|player| player.graveyard.iter().copied()),
+            ),
+            Zone::Hand => ids.extend(
+                state
+                    .players
+                    .iter()
+                    .flat_map(|player| player.hand.iter().copied()),
+            ),
+            Zone::Library => ids.extend(
+                state
+                    .players
+                    .iter()
+                    .flat_map(|player| player.library.iter().copied()),
+            ),
+            Zone::Stack => ids.extend(state.stack.iter().map(|entry| entry.source_id)),
+        }
+    }
+    ids
 }
 
 fn has_opponent_bounce_target(ctx: &PolicyContext<'_>, effects: &[&Effect]) -> bool {
@@ -713,8 +765,9 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        ContinuousModification, FilterProp, PtValue, ResolvedAbility, StaticDefinition,
-        TargetFilter, TypeFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, FilterProp, PtValue,
+        ResolvedAbility, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter,
+        TypedFilter,
     };
     use engine::types::game_state::{GameState, PendingCast, TargetSelectionSlot, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
@@ -722,6 +775,7 @@ mod tests {
     use engine::types::mana::ManaCost;
     use engine::types::player::PlayerId;
     use engine::types::statics::StaticMode;
+    use engine::types::triggers::TriggerMode;
     use engine::types::zones::Zone;
 
     fn make_state() -> GameState {
@@ -781,6 +835,139 @@ mod tests {
             },
         };
         (decision, candidate)
+    }
+
+    fn graveyard_recursion_creature(state: &mut GameState) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(900),
+            PlayerId(0),
+            "Gravedigger".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+
+        let mut creature_card = TypedFilter::creature();
+        creature_card.controller = Some(ControllerRef::You);
+        creature_card.properties.push(FilterProp::InZone {
+            zone: Zone::Graveyard,
+        });
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.destination = Some(Zone::Battlefield);
+        trigger.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                target: TargetFilter::Typed(creature_card),
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: Vec::new(),
+            },
+        )));
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+        id
+    }
+
+    fn make_cast_spell_decision(
+        state: &GameState,
+        object_id: ObjectId,
+    ) -> (AiDecisionContext, CandidateAction) {
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id,
+                card_id: state.objects[&object_id].card_id,
+                targets: Vec::new(),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Spell,
+            },
+        };
+        (decision, candidate)
+    }
+
+    #[test]
+    fn pre_cast_penalizes_graveyard_etb_with_empty_graveyard() {
+        let mut state = make_state();
+        let spell_id = graveyard_recursion_creature(&mut state);
+        let config = AiConfig::default();
+        let (decision, candidate) = make_cast_spell_decision(&state, spell_id);
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+        };
+
+        let score = AntiSelfHarmPolicy.score(&ctx);
+
+        assert!(
+            score < -5.0,
+            "Empty graveyard should make targeted recursion ETB a wasted cast, got {score}"
+        );
+    }
+
+    #[test]
+    fn pre_cast_allows_graveyard_etb_with_matching_graveyard_card() {
+        let mut state = make_state();
+        let spell_id = graveyard_recursion_creature(&mut state);
+        let target = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Dead Bear".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let config = AiConfig::default();
+        let (decision, candidate) = make_cast_spell_decision(&state, spell_id);
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+        };
+
+        let score = AntiSelfHarmPolicy.score(&ctx);
+
+        assert!(
+            score > -1.0,
+            "Matching graveyard target should avoid ETB whiff penalty, got {score}"
+        );
     }
 
     #[test]

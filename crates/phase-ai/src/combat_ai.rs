@@ -114,16 +114,10 @@ pub fn choose_attackers_with_targets_with_profile(
         let my_value = evaluate_creature(state, id);
         let my_power = obj.power.unwrap_or(0);
 
-        let has_evasion = obj.has_keyword(&Keyword::Flying)
-            || obj.has_keyword(&Keyword::Menace)
-            || obj.has_keyword(&Keyword::Shadow)
-            || has_cant_be_blocked(state, obj);
-        // CR 702.20b: Attacking with vigilance doesn't cause the creature to tap,
-        // so it has zero defensive cost — always include vigilance creatures.
-        let has_vigilance = obj.has_keyword(&Keyword::Vigilance);
+        let is_unblockable = has_cant_be_blocked(state, obj);
         let has_lifelink = obj.has_keyword(&Keyword::Lifelink);
 
-        if has_evasion || has_vigilance || opponent_blockers.is_empty() {
+        if is_unblockable || opponent_blockers.is_empty() {
             attacking_ids.push(id);
             continue;
         }
@@ -304,11 +298,7 @@ fn preferred_attack_opponent(
         }
     }
 
-    opponents.iter().copied().max_by(|&a, &b| {
-        threat_level(state, player, a)
-            .partial_cmp(&threat_level(state, player, b))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    })
+    multiplayer_pressure_target(state, player, opponents)
 }
 
 /// Assign each attacker to an opponent based on threat and lethal detection.
@@ -318,12 +308,7 @@ fn assign_attack_targets(
     opponents: &[PlayerId],
     attacking_ids: Vec<ObjectId>,
 ) -> Vec<(ObjectId, AttackTarget)> {
-    // Sort opponents by threat (descending)
-    let mut threat_ranked: Vec<(PlayerId, f64)> = opponents
-        .iter()
-        .map(|&opp| (opp, threat_level(state, player, opp)))
-        .collect();
-    threat_ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let threat_ranked = threat_ranked_opponents(state, player, opponents);
 
     let total_power: i32 = attacking_ids
         .iter()
@@ -371,9 +356,52 @@ fn assign_attack_targets(
         }
     }
 
-    // Default: send all to highest-threat opponent
-    let primary = AttackTarget::Player(threat_ranked[0].0);
+    // Default: pressure the next opponent in turn order unless one opponent is
+    // a clear archenemy. This prevents every bot in a multiplayer pod from
+    // dogpiling the same seat on small, noisy threat-score differences.
+    let primary = AttackTarget::Player(
+        multiplayer_pressure_target(state, player, opponents).unwrap_or(threat_ranked[0].0),
+    );
     attacking_ids.into_iter().map(|id| (id, primary)).collect()
+}
+
+const MULTIPLAYER_FOCUS_THREAT_MARGIN: f64 = 0.18;
+
+fn threat_ranked_opponents(
+    state: &GameState,
+    player: PlayerId,
+    opponents: &[PlayerId],
+) -> Vec<(PlayerId, f64)> {
+    let mut ranked: Vec<_> = opponents
+        .iter()
+        .map(|&opp| (opp, threat_level(state, player, opp)))
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked
+}
+
+fn multiplayer_pressure_target(
+    state: &GameState,
+    player: PlayerId,
+    opponents: &[PlayerId],
+) -> Option<PlayerId> {
+    let ranked = threat_ranked_opponents(state, player, opponents);
+    let (top, top_score) = ranked.first().copied()?;
+    if ranked.len() == 1 {
+        return Some(top);
+    }
+
+    let second_score = ranked[1].1;
+    if top_score - second_score >= MULTIPLAYER_FOCUS_THREAT_MARGIN {
+        return Some(top);
+    }
+
+    let next = players::next_player(state, player);
+    if opponents.contains(&next) {
+        Some(next)
+    } else {
+        Some(top)
+    }
 }
 
 /// Backward-compatible wrapper: returns just attacker IDs (all targeting first opponent).
@@ -987,7 +1015,7 @@ fn should_attack_given_objective(
     favorable_trade: bool,
     has_lifelink: bool,
     attacker_power: i32,
-    profile: &AiProfile,
+    _profile: &AiProfile,
 ) -> bool {
     // Lifelink creates a life swing: opponent loses N, you gain N = 2N effective swing.
     // This makes marginal attacks worthwhile, especially while racing.
@@ -996,15 +1024,7 @@ fn should_attack_given_objective(
         CombatObjective::PushLethal => true,
         CombatObjective::Stabilize => free_damage || lifelink_bonus,
         CombatObjective::PreserveAdvantage => free_damage || favorable_trade || lifelink_bonus,
-        CombatObjective::Race => {
-            // Aggressive profiles (high risk tolerance, e.g. aggro decks) accept
-            // unfavorable trades in a race — they prioritize pushing damage.
-            if profile.risk_tolerance > 0.7 {
-                true
-            } else {
-                free_damage || favorable_trade || lifelink_bonus
-            }
-        }
+        CombatObjective::Race => free_damage || favorable_trade || lifelink_bonus,
     }
 }
 
@@ -1540,6 +1560,48 @@ mod tests {
     }
 
     #[test]
+    fn flyer_does_not_attack_into_larger_flying_blocker() {
+        let mut state = setup();
+        let flyer = add_creature(&mut state, PlayerId(0), "Bird", 2, 2, vec![Keyword::Flying]);
+        add_creature(
+            &mut state,
+            PlayerId(1),
+            "Serra Angel",
+            4,
+            4,
+            vec![Keyword::Flying],
+        );
+
+        let attackers = choose_attackers(&state, PlayerId(0));
+
+        assert!(
+            !attackers.contains(&flyer),
+            "Flying is evasion, not unblockable; AI should not suicide into a larger flyer"
+        );
+    }
+
+    #[test]
+    fn vigilance_does_not_attack_into_larger_blocker() {
+        let mut state = setup();
+        let vigilant = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Watchwolf",
+            3,
+            3,
+            vec![Keyword::Vigilance],
+        );
+        add_creature(&mut state, PlayerId(1), "Giant", 5, 5, vec![]);
+
+        let attackers = choose_attackers(&state, PlayerId(0));
+
+        assert!(
+            !attackers.contains(&vigilant),
+            "Vigilance removes tap cost, but does not make a bad block profitable"
+        );
+    }
+
+    #[test]
     fn attacks_when_no_blockers() {
         let mut state = setup();
         let bear = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
@@ -1738,6 +1800,31 @@ mod tests {
         assert!(
             attacks_on_p2 > 0,
             "Should allocate attackers to finish off weak opponent"
+        );
+    }
+
+    #[test]
+    fn four_player_bots_do_not_all_focus_same_seat_on_equal_threat() {
+        let mut state = setup_multiplayer(4);
+        let p1_attacker = add_creature(&mut state, PlayerId(1), "P1 Bear", 2, 2, vec![]);
+        let p2_attacker = add_creature(&mut state, PlayerId(2), "P2 Bear", 2, 2, vec![]);
+        let p3_attacker = add_creature(&mut state, PlayerId(3), "P3 Bear", 2, 2, vec![]);
+
+        let p1_attacks = choose_attackers_with_targets(&state, PlayerId(1));
+        let p2_attacks = choose_attackers_with_targets(&state, PlayerId(2));
+        let p3_attacks = choose_attackers_with_targets(&state, PlayerId(3));
+
+        assert_eq!(
+            p1_attacks,
+            vec![(p1_attacker, AttackTarget::Player(PlayerId(2)))]
+        );
+        assert_eq!(
+            p2_attacks,
+            vec![(p2_attacker, AttackTarget::Player(PlayerId(3)))]
+        );
+        assert_eq!(
+            p3_attacks,
+            vec![(p3_attacker, AttackTarget::Player(PlayerId(0)))]
         );
     }
 
