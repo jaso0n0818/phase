@@ -5269,23 +5269,27 @@ pub fn pay_ability_cost(
                 }
             }
         }
-        // CR 118.3 + CR 702.97a: "Exile this card from your graveyard" as a self-ref
-        // activation cost (Scavenge, Renew, and other graveyard-activated abilities).
-        // The source is identified by SelfRef; no player choice is needed, so this
-        // is an auto-payable cost (no WaitingFor round-trip). Non-self exile costs
-        // (targeted exile from any zone) are still handled by the catch-all below.
+        // CR 118.3: A self-ref "exile this card" activation cost — the source
+        // exiles itself from whatever zone the cost names. Covers exile-from-
+        // graveyard costs (CR 702.97a Scavenge, Renew), the exile-from-hand
+        // cost of CR 702.62a Suspend ("you may pay [cost] and exile it"), and
+        // the exile-from-hand cost of CR 702.170a Plot ("you may exile this
+        // card from your hand and pay [cost]"). The source is identified by
+        // SelfRef; no player choice is needed, so this is an auto-payable cost
+        // (no WaitingFor round-trip). Non-self exile costs (targeted exile from
+        // any zone) are still handled by the catch-all below.
         AbilityCost::Exile {
             filter: Some(TargetFilter::SelfRef),
-            zone: Some(Zone::Graveyard),
+            zone: Some(z),
             count: 1,
         } => {
             let obj = state.objects.get(&source_id).ok_or_else(|| {
                 EngineError::InvalidAction("Source object not found for exile cost".to_string())
             })?;
-            if obj.zone != Zone::Graveyard {
-                return Err(EngineError::ActionNotAllowed(
-                    "Cannot exile from graveyard: source is not in a graveyard".to_string(),
-                ));
+            if obj.zone != *z {
+                return Err(EngineError::ActionNotAllowed(format!(
+                    "Cannot exile self for cost: source is not in {z:?}"
+                )));
             }
             super::zones::move_to_zone(state, source_id, Zone::Exile, events);
         }
@@ -5567,9 +5571,9 @@ fn find_non_self_discard(cost: &AbilityCost) -> Option<(&QuantityExpr, Option<&T
 
 /// CR 118.3 + CR 602.2b: Detect a non-self "exile a card from hand/graveyard"
 /// activation cost requiring interactive card selection (Jhoira of the Ghitu).
-/// Self-ref exile (Scavenge) returns `None` — that shape is auto-paid by
-/// `pay_ability_cost`'s graveyard arm and never back-referenced as a cost-paid
-/// object. Recurses into `Composite`.
+/// Self-ref exile (Scavenge, Suspend) returns `None` — that shape is auto-paid
+/// by `pay_ability_cost`'s self-ref exile arm and never back-referenced as a
+/// cost-paid object. Recurses into `Composite`.
 fn find_non_self_exile(cost: &AbilityCost) -> Option<(u32, Zone, Option<&TargetFilter>)> {
     match cost {
         AbilityCost::Exile {
@@ -9066,6 +9070,185 @@ mod tests {
             ),
             "the exiled card must have suspend granted by Jhoira's sub-ability"
         );
+    }
+
+    /// Issues #520 (Curse of the Cabal) + #521 (Profane Tutor): activating a
+    /// printed-Suspend card's synthesized activation ability must actually
+    /// exile the card from hand (CR 702.62a "you may pay [cost] and exile it",
+    /// CR 702.62b "a card is 'suspended' if it's in the exile zone ... and has
+    /// a time counter on it"). The bug: `pay_ability_cost`'s self-ref exile
+    /// arm was pinned to `zone: Some(Zone::Graveyard)`, so the synthesized
+    /// `Exile { zone: Hand, filter: SelfRef }` cost fell to the no-op
+    /// catch-all — mana and time counters were applied but the card stayed in
+    /// hand. The generalized arm (`zone: Some(z)`, guarded `obj.zone == z`)
+    /// repairs every printed-Suspend card.
+    ///
+    /// This also covers the Plot keyword (CR 702.170a "you may exile this card
+    /// from your hand and pay [cost]"), which `synthesize_plot` emits with the
+    /// identical self-ref `Exile { zone: Hand }` cost shape — Aloe Alchemist
+    /// is included to prove the fix is keyword-general, not Suspend-specific.
+    ///
+    /// Drives the real `ActivateAbility` pipeline. Each card's abilities and
+    /// keywords are produced by the production synthesizers
+    /// (`synthesize_suspend` / `synthesize_plot`) so the exact synthesized
+    /// `Composite { Mana, Exile }` cost is exercised.
+    #[test]
+    fn self_ref_exile_cost_exiles_card_from_hand() {
+        use super::super::engine::apply_as_current;
+        use crate::database::synthesis::{synthesize_plot, synthesize_suspend};
+        use crate::types::card::CardFace;
+        use crate::types::counter::CounterType;
+
+        /// Builds a hand object whose abilities + keywords come from running a
+        /// production synthesizer on a fresh `CardFace`. Returns the object id.
+        fn synthesized_hand_card(
+            state: &mut GameState,
+            card_id: u64,
+            name: &str,
+            core_type: CoreType,
+            keyword: Keyword,
+            synth: fn(&mut CardFace),
+        ) -> ObjectId {
+            let mut face = CardFace::default();
+            face.keywords.push(keyword.clone());
+            synth(&mut face);
+
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(core_type);
+            obj.base_card_types = obj.card_types.clone();
+            obj.keywords = face.keywords.clone();
+            obj.base_keywords = face.keywords.clone();
+            *Arc::make_mut(&mut obj.abilities) = face.abilities.clone();
+            *Arc::make_mut(&mut obj.base_abilities) = face.abilities.clone();
+            id
+        }
+
+        /// Activates the hand-zone activation ability (index 0 is the
+        /// synthesized Suspend/Plot activation) and asserts the card landed in
+        /// exile. `time_counters` is `Some(n)` for Suspend (CR 702.62a) and
+        /// `None` for Plot (which carries no counters).
+        fn activate_and_assert_exiled(
+            state: &mut GameState,
+            card: ObjectId,
+            name: &str,
+            time_counters: Option<u32>,
+        ) {
+            apply_as_current(
+                state,
+                GameAction::ActivateAbility {
+                    source_id: card,
+                    ability_index: 0,
+                },
+            )
+            .unwrap_or_else(|e| panic!("{name}: activation must enter the pipeline: {e:?}"));
+
+            // CR 702.62b / CR 702.170a: the self-ref exile cost is paid during
+            // activation — it must have moved the card Hand -> Exile. This is
+            // the discriminating assertion: with the fix reverted to
+            // `zone: Some(Zone::Graveyard)` the card is observed in `Zone::Hand`.
+            assert_eq!(
+                state.objects[&card].zone,
+                Zone::Exile,
+                "{name}: self-ref exile cost must move the card to exile"
+            );
+
+            // Resolve the activation ability so its `PutCounter` effect lands.
+            let mut events = Vec::new();
+            stack::resolve_top(state, &mut events);
+
+            if let Some(n) = time_counters {
+                // CR 122.1 + CR 702.62a: N time counters land on the exiled card.
+                assert_eq!(
+                    state.objects[&card]
+                        .counters
+                        .get(&CounterType::Time)
+                        .copied(),
+                    Some(n),
+                    "{name}: exiled card must carry {n} time counters"
+                );
+            }
+        }
+
+        // #521 Profane Tutor — Suspend 2—{1}{U}, a sorcery.
+        let mut state = setup_game_at_main_phase();
+        let profane_tutor = synthesized_hand_card(
+            &mut state,
+            5210,
+            "Profane Tutor",
+            CoreType::Sorcery,
+            Keyword::Suspend {
+                count: 2,
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 1,
+                },
+            },
+            synthesize_suspend,
+        );
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+        activate_and_assert_exiled(&mut state, profane_tutor, "Profane Tutor", Some(2));
+
+        // #520 Curse of the Cabal — Suspend 3—{S}{B}{B}{B}, an enchantment.
+        // CR 107.4h: `{S}` is paid with one mana of any type from a snow source.
+        let mut state = setup_game_at_main_phase();
+        let curse = synthesized_hand_card(
+            &mut state,
+            5200,
+            "Curse of the Cabal",
+            CoreType::Enchantment,
+            Keyword::Suspend {
+                count: 3,
+                cost: ManaCost::Cost {
+                    shards: vec![
+                        ManaCostShard::Snow,
+                        ManaCostShard::Black,
+                        ManaCostShard::Black,
+                        ManaCostShard::Black,
+                    ],
+                    generic: 0,
+                },
+            },
+            synthesize_suspend,
+        );
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 3);
+        // CR 107.4h: `{S}` needs one mana from a snow source.
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Black,
+            source_id: ObjectId(0),
+            snow: true,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+        activate_and_assert_exiled(&mut state, curse, "Curse of the Cabal", Some(3));
+
+        // Build-for-the-class: Plot emits the identical self-ref `Exile {
+        // zone: Hand }` cost shape (CR 702.170a). Aloe Alchemist — Plot {1}{G},
+        // a creature — proves the generalized arm repairs Plot too.
+        let mut state = setup_game_at_main_phase();
+        let aloe = synthesized_hand_card(
+            &mut state,
+            5300,
+            "Aloe Alchemist",
+            CoreType::Creature,
+            Keyword::Plot(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            }),
+            synthesize_plot,
+        );
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+        activate_and_assert_exiled(&mut state, aloe, "Aloe Alchemist", None);
     }
 
     /// Issue #501: Jhoira of the Ghitu grants Suspend at runtime via its
