@@ -2329,6 +2329,39 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                 }
             }
         }
+
+        // CR 113.6b + CR 602.2: Graveyard-activated abilities (Teacher's Pest,
+        // Bloodsoaked Champion, Dread Wanderer, etc.). CR 113.6b: an ability
+        // whose text states it functions from the graveyard can be activated
+        // from there. CR 602.2: to activate an ability is to put it onto the
+        // stack and pay its costs. Non-mana graveyard activations are
+        // suppressed by split second, mirroring the hand-zone loop above.
+        for &obj_id in &state.players[player.0 as usize].graveyard {
+            if let Some(obj) = state.objects.get(&obj_id) {
+                // CR 602.2: "Only an object's controller (or its owner, if it
+                // doesn't have a controller) can activate its activated
+                // ability." Restrict candidates to the acting player.
+                if obj.controller == player {
+                    for (i, ability_def) in obj.abilities.iter().enumerate() {
+                        if ability_def.kind == crate::types::ability::AbilityKind::Activated
+                            && ability_def.activation_zone
+                                == Some(crate::types::zones::Zone::Graveyard)
+                            && !crate::game::mana_abilities::is_mana_ability(ability_def)
+                            && casting::can_activate_ability_now(state, player, obj_id, i)
+                        {
+                            actions.push(candidate(
+                                GameAction::ActivateAbility {
+                                    source_id: obj_id,
+                                    ability_index: i,
+                                },
+                                TacticalClass::Ability,
+                                Some(player),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // CR 605.1a + CR 605.3b: Hand-zone mana abilities (Elvish Spirit Guide
@@ -2341,6 +2374,40 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                 for (i, ability_def) in obj.abilities.iter().enumerate() {
                     if ability_def.kind == crate::types::ability::AbilityKind::Activated
                         && ability_def.activation_zone == Some(crate::types::zones::Zone::Hand)
+                        && crate::game::mana_abilities::is_mana_ability(ability_def)
+                        && crate::game::mana_abilities::can_activate_mana_ability_now(
+                            state,
+                            player,
+                            obj_id,
+                            i,
+                            ability_def,
+                        )
+                    {
+                        actions.push(candidate(
+                            GameAction::ActivateAbility {
+                                source_id: obj_id,
+                                ability_index: i,
+                            },
+                            TacticalClass::Mana,
+                            Some(player),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // CR 605.1a + CR 605.3b: Graveyard-zone mana abilities (Jack-o'-Lantern's
+    // "{1}, Exile this card from your graveyard: Add one mana of any color")
+    // remain legal under split second because they are mana abilities, so this
+    // loop lives outside the split-second-gated block — mirroring the hand-zone
+    // mana loop above. CR 602.2: only the object's controller can activate it.
+    for &obj_id in &state.players[player.0 as usize].graveyard {
+        if let Some(obj) = state.objects.get(&obj_id) {
+            if obj.controller == player {
+                for (i, ability_def) in obj.abilities.iter().enumerate() {
+                    if ability_def.kind == crate::types::ability::AbilityKind::Activated
+                        && ability_def.activation_zone == Some(crate::types::zones::Zone::Graveyard)
                         && crate::game::mana_abilities::is_mana_ability(ability_def)
                         && crate::game::mana_abilities::can_activate_mana_ability_now(
                             state,
@@ -4284,6 +4351,200 @@ mod tests {
             !has_cast_from_gy,
             "CR 601.2a: A sorcery in the graveyard without flashback/escape/harmonize/aftermath \
              must NOT be offered as a CastSpell candidate"
+        );
+    }
+
+    /// Builds a graveyard object owning a single non-mana `Activated` ability
+    /// (`{B}{G}: Return this card from your graveyard to the battlefield
+    /// tapped.` — Teacher's Pest) and returns its `ObjectId`.
+    fn make_teachers_pest_in_graveyard(state: &mut GameState, card_id: u64) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card_id),
+            PlayerId(0),
+            "Teacher's Pest".to_string(),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: true,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+        )
+        .cost(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Black, ManaCostShard::Green],
+            },
+        });
+        ability.activation_zone = Some(Zone::Graveyard);
+        Arc::make_mut(&mut obj.abilities).push(ability);
+        id
+    }
+
+    fn give_player_mana(state: &mut GameState, player: usize, color: ManaType) {
+        state.players[player].mana_pool.add(ManaUnit {
+            color,
+            source_id: ObjectId(0),
+            snow: false,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+    }
+
+    /// Issue #533: Teacher's Pest has a printed `{B}{G}` graveyard-activated
+    /// ability. Candidate generation must offer it when the player can pay,
+    /// and must NOT offer it when the player cannot — proving the new
+    /// graveyard loop is gated through `can_activate_ability_now`'s
+    /// affordability check (Change 1, the non-mana graveyard loop).
+    #[test]
+    fn graveyard_activated_ability_offered_when_affordable() {
+        // Positive arm: {B}{G} available → ability offered.
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let pest = make_teachers_pest_in_graveyard(&mut state, 600);
+        give_player_mana(&mut state, 0, ManaType::Black);
+        give_player_mana(&mut state, 0, ManaType::Green);
+
+        let offered = candidate_actions(&state).iter().any(|c| {
+            matches!(
+                c.action,
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index: 0,
+                } if source_id == pest
+            )
+        });
+        assert!(
+            offered,
+            "CR 113.6b: Teacher's Pest's graveyard-activated ability must be \
+             offered as an ActivateAbility candidate when {{B}}{{G}} is payable"
+        );
+
+        // Negative (discriminating) arm: empty mana pool → not offered.
+        let mut broke = GameState::new_two_player(42);
+        broke.phase = Phase::PreCombatMain;
+        broke.active_player = PlayerId(0);
+        broke.priority_player = PlayerId(0);
+        broke.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let pest2 = make_teachers_pest_in_graveyard(&mut broke, 601);
+
+        let offered_broke = candidate_actions(&broke).iter().any(|c| {
+            matches!(
+                c.action,
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index: 0,
+                } if source_id == pest2
+            )
+        });
+        assert!(
+            !offered_broke,
+            "CR 602.2: The graveyard-activated ability must NOT be offered \
+             when its {{B}}{{G}} cost is unpayable — the candidate flows \
+             through the can_activate_ability_now affordability gate"
+        );
+    }
+
+    /// Issue #533 — class proof for Change 2 (the graveyard MANA loop).
+    /// Jack-o'-Lantern's `{1}, Exile this card from your graveyard: Add one
+    /// mana of any color` is a real graveyard-activated mana ability
+    /// (`is_mana_ability` classifies the `Effect::Mana` with no target as a
+    /// mana ability). With {1} payable it must be offered as a Mana-class
+    /// ActivateAbility candidate, exercising the mana loop placed outside the
+    /// split-second-gated block.
+    #[test]
+    fn graveyard_mana_ability_offered_when_affordable() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let lantern = create_object(
+            &mut state,
+            CardId(700),
+            PlayerId(0),
+            "Jack-o'-Lantern".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&lantern).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            let mut ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        color_options: vec![
+                            ManaColor::White,
+                            ManaColor::Blue,
+                            ManaColor::Black,
+                            ManaColor::Red,
+                            ManaColor::Green,
+                        ],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![],
+                },
+            });
+            ability.activation_zone = Some(Zone::Graveyard);
+            Arc::make_mut(&mut obj.abilities).push(ability);
+        }
+        // Sanity: confirm this ability really classifies as a mana ability so
+        // the test exercises Change 2 (the mana loop), not Change 1.
+        assert!(
+            crate::game::mana_abilities::is_mana_ability(&state.objects[&lantern].abilities[0]),
+            "Jack-o'-Lantern's graveyard ability must classify as a mana \
+             ability — otherwise this test does not cover the mana loop"
+        );
+        give_player_mana(&mut state, 0, ManaType::Colorless);
+
+        let offered = candidate_actions(&state)
+            .iter()
+            .find_map(|c| match c.action {
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index: 0,
+                } if source_id == lantern => Some(c.metadata.tactical_class),
+                _ => None,
+            });
+        assert_eq!(
+            offered,
+            Some(TacticalClass::Mana),
+            "CR 605.1a: Jack-o'-Lantern's graveyard-activated mana ability \
+             must be offered as a Mana-class ActivateAbility candidate"
         );
     }
 }
