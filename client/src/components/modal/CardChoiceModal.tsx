@@ -12,6 +12,10 @@ import { CancelButton, ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from 
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
 import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
+import {
+  SeparatePilesChoiceModal,
+  SeparatePilesPartitionModal,
+} from "./SeparatePilesModal.tsx";
 import { DungeonChoiceModal, RoomChoiceModal } from "./DungeonChoiceModal.tsx";
 import { DamageAssignmentModal } from "../combat/DamageAssignmentModal.tsx";
 import { DistributeAmongModal } from "./DistributeAmongModal.tsx";
@@ -195,6 +199,12 @@ export function CardChoiceModal() {
     case "VoteChoice":
       if (!canActForWaitingState) return null;
       return <VoteChoiceModal data={waitingFor.data} />;
+    case "SeparatePilesPartition":
+      if (!canActForWaitingState) return null;
+      return <SeparatePilesPartitionModal data={waitingFor.data} />;
+    case "SeparatePilesChoice":
+      if (!canActForWaitingState) return null;
+      return <SeparatePilesChoiceModal data={waitingFor.data} />;
     case "DiscardToHandSize":
       if (!canActForWaitingState) return null;
       return <DiscardModal data={waitingFor.data} />;

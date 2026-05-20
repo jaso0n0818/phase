@@ -1029,7 +1029,41 @@ export type WaitingFor =
       remaining_players: PlayerId[];
       all_kept: ObjectId[];
     } }
-  | { type: "CopyRetarget"; data: { player: PlayerId; copy_id: ObjectId; target_slots: CopyTargetSlot[]; current_slot?: number } };
+  | { type: "CopyRetarget"; data: { player: PlayerId; copy_id: ObjectId; target_slots: CopyTargetSlot[]; current_slot?: number } }
+  // CR 700.3 + CR 700.3a: Subject is partitioning their own eligible objects
+  // into two piles for an `Effect::SeparateIntoPiles`. `player` is the
+  // partitioner (subject); pile B is derived engine-side as
+  // `eligible \ pile_a`. `chosen_pile_effect` is opaque to the frontend.
+  | { type: "SeparatePilesPartition"; data: {
+      player: PlayerId;
+      eligible: ObjectId[];
+      remaining_subjects: [PlayerId, ObjectId[]][];
+      completed: PileResult[];
+      chooser: PlayerId;
+      source_id: ObjectId;
+    } }
+  // CR 700.3 + CR 101.4c: Chooser picks pile A or pile B per completed
+  // subject partition.
+  | { type: "SeparatePilesChoice"; data: {
+      player: PlayerId;
+      pending: PileResult[];
+      current: PileResult;
+      source_id: ObjectId;
+    } };
+
+// CR 700.3 + CR 700.3a + CR 700.3d: One subject's completed pile partition.
+export interface PileResult {
+  subject: PlayerId;
+  pile_a: ObjectId[];
+  pile_b: ObjectId[];
+}
+
+// CR 700.3: Identifies one of the two piles produced by a
+// `SeparateIntoPiles` partition. Typed enum (no bool) shared by the engine
+// handler and the `GameAction::ChoosePile` payload.
+export type PileSide =
+  | { type: "A" }
+  | { type: "B" };
 
 // ── Learn ────────────────────────────────────────────────────────────────
 
@@ -1180,6 +1214,8 @@ export type GameAction =
   | { type: "SubmitSideboard"; data: { main: DeckCardCount[]; sideboard: DeckCardCount[] } }
   | { type: "ChoosePlayDraw"; data: { play_first: boolean } }
   | { type: "ChooseOption"; data: { choice: string } }
+  | { type: "SubmitPilePartition"; data: { pile_a: ObjectId[] } }
+  | { type: "ChoosePile"; data: { pile: PileSide } }
   | { type: "ChooseBranch"; data: { index: number } }
   | { type: "ChooseDamageSource"; data: { source: ObjectId } }
   | { type: "SelectModes"; data: { indices: number[] } }
