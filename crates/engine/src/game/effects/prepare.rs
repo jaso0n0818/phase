@@ -143,12 +143,11 @@ pub fn unprepare_object(state: &mut GameState, object_id: ObjectId, events: &mut
     events.push(GameEvent::BecameUnprepared { object_id });
 }
 
-/// CR 707.10c: After pushing a spell-copy to the stack, open target selection
-/// via `WaitingFor::CopyRetarget` if the copy's ability requires targets. The
-/// copy's stack entry is seeded with the first legal target for each slot (so
-/// auto-pass / pass-priority paths resolve with legal targets if the
-/// controller declines to retarget), and every slot exposes its full legal
-/// alternatives list to the frontend/AI for interactive retargeting.
+/// CR 601.2c / CR 722.3c: After pushing a freshly cast prepare/paradigm copy
+/// to the stack, open target selection via `WaitingFor::CopyRetarget` if the
+/// copy's ability requires targets. The copy is not a copy of an
+/// already-targeted spell, so each slot starts with no chosen target and
+/// exposes its full legal alternatives list to the frontend/AI.
 ///
 /// Returns `Ok(true)` if a `CopyRetarget` wait was armed, `Ok(false)` if the
 /// ability has no target slots and the caller should return to Priority
@@ -176,34 +175,14 @@ pub(crate) fn open_copy_target_selection(
         return Ok(false);
     }
 
-    // CR 601.2c: Seed each slot with its first legal target so auto-pass paths
-    // resolve legally. If any slot has no legal targets, the copy cannot be
-    // legally cast — but we still push the prompt so the controller can see
-    // the illegal state (CR 707.10c permits but does not require legal
-    // targets on copies). For SOS scope, all three target-requiring Paradigm
-    // cards and any targeted Prepare-face spell will have legal targets when
-    // the offer is accepted; no-legal-targets is a pathological case.
-    let seeded_targets: Vec<TargetRef> = slots
-        .iter()
-        .filter_map(|slot| slot.legal_targets.first().cloned())
-        .collect();
-
-    // Update the stack entry's ability with seeded targets.
-    if let Some(entry) = state.stack.iter_mut().find(|e| e.id == copy_id) {
-        if let Some(ability) = entry.ability_mut() {
-            ability.targets = seeded_targets.clone();
-        }
-    }
-
-    // Build CopyTargetSlot entries exposing legal alternatives.
+    // CR 601.2c / CR 722.3c: This is a cast of a fresh copy, not a copied
+    // already-targeted spell. Do not seed "current" from the first legal
+    // target; that would make battlefield order look like an intentional
+    // target choice. The player must choose the target that completes the cast.
     let target_slots: Vec<CopyTargetSlot> = slots
         .iter()
-        .enumerate()
-        .map(|(idx, slot)| CopyTargetSlot {
-            current: seeded_targets
-                .get(idx)
-                .cloned()
-                .unwrap_or(TargetRef::Object(copy_id)),
+        .map(|slot| CopyTargetSlot {
+            current: None,
             legal_alternatives: slot.legal_targets.clone(),
         })
         .collect();
@@ -692,15 +671,16 @@ mod tests {
                         .contains(&TargetRef::Object(creature_id)),
                     "legal alternatives must include battlefield creature"
                 );
-                // Seeded `current` should be one of the legal alternatives.
-                assert!(target_slots[0]
-                    .legal_alternatives
-                    .contains(&target_slots[0].current));
+                assert_eq!(
+                    target_slots[0].current, None,
+                    "freshly cast copy should not preselect a target"
+                );
             }
             other => panic!("expected CopyRetarget, got {other:?}"),
         }
 
-        // Verify the stack entry's ability targets were seeded.
+        // Verify the stack entry's ability targets remain empty until the
+        // player actually chooses a target.
         let entry_targets = state
             .stack
             .iter()
@@ -708,7 +688,41 @@ mod tests {
             .and_then(|e| e.ability())
             .map(|a| a.targets.clone())
             .unwrap_or_default();
-        assert_eq!(entry_targets.len(), 1, "stack entry seeded with one target");
+        assert!(
+            entry_targets.is_empty(),
+            "stack entry must not seed a target"
+        );
+
+        let legal_actions = legal_actions(&state).actions;
+        assert!(
+            !legal_actions
+                .iter()
+                .any(|action| matches!(action, GameAction::KeepAllCopyTargets)),
+            "freshly cast copy has no current target to keep"
+        );
+        assert!(
+            !legal_actions
+                .iter()
+                .any(|action| matches!(action, GameAction::ChooseTarget { target: None })),
+            "freshly cast copy has no current target to keep for this slot"
+        );
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(creature_id)),
+            },
+        )
+        .expect("choosing a legal target should complete copy target selection");
+
+        let chosen_targets = state
+            .stack
+            .iter()
+            .find(|e| e.id == copy_id)
+            .and_then(|e| e.ability())
+            .map(|a| a.targets.clone())
+            .unwrap_or_default();
+        assert_eq!(chosen_targets, vec![TargetRef::Object(creature_id)]);
     }
 
     #[test]

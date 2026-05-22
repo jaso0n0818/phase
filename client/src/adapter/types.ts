@@ -728,7 +728,7 @@ export type TargetRef =
   | { Object: ObjectId }
   | { Player: PlayerId };
 
-export type CopyTargetSlot = { current: TargetRef; legal_alternatives: TargetRef[] };
+export type CopyTargetSlot = { current?: TargetRef | null; legal_alternatives: TargetRef[] };
 
 // ── Combat ───────────────────────────────────────────────────────────────
 

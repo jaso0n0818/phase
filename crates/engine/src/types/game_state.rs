@@ -2577,10 +2577,14 @@ pub enum WaitingFor {
     },
 }
 
-/// CR 707.10c: A target slot on a copied spell, showing current target and alternatives.
+/// CR 707.10c / CR 722.3c: A target slot on a copied spell, showing the
+/// current target when one exists and the legal alternatives. A normal copied
+/// spell starts with copied targets; a freshly cast prepare-spell copy has no
+/// chosen target until the player chooses one during casting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyTargetSlot {
-    pub current: TargetRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<TargetRef>,
     pub legal_alternatives: Vec<TargetRef>,
 }
 

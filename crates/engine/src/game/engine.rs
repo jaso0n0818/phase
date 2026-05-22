@@ -924,8 +924,17 @@ fn finalize_copy_retarget(
     copy_id: ObjectId,
     slots: &[crate::types::game_state::CopyTargetSlot],
     events: &mut Vec<GameEvent>,
-) {
-    let targets: Vec<_> = slots.iter().map(|s| s.current.clone()).collect();
+) -> Result<(), EngineError> {
+    let targets: Vec<_> = slots
+        .iter()
+        .map(|slot| {
+            slot.current.clone().ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "Copy target selection has an unchosen target slot".to_string(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     if let Some(entry) = state.stack.iter_mut().find(|e| e.id == copy_id) {
         if let Some(ability) = entry.ability_mut() {
             ability.targets = targets;
@@ -938,6 +947,7 @@ fn finalize_copy_retarget(
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
     effects::drain_pending_continuation(state, events);
+    Ok(())
 }
 
 fn apply_action(
@@ -3458,10 +3468,14 @@ fn apply_action(
                         "Target {t:?} not a legal alternative for copy slot {slot_idx}"
                     )));
                 }
+            } else if target_slots[slot_idx].current.is_none() {
+                return Err(EngineError::InvalidAction(format!(
+                    "Copy target slot {slot_idx} has no current target to keep"
+                )));
             }
             let mut updated_slots = target_slots.clone();
             if let Some(t) = target {
-                updated_slots[slot_idx].current = t.clone();
+                updated_slots[slot_idx].current = Some(t.clone());
             }
             let next_slot = slot_idx + 1;
             if next_slot < updated_slots.len() {
@@ -3472,7 +3486,7 @@ fn apply_action(
                     current_slot: next_slot,
                 };
             } else {
-                finalize_copy_retarget(state, p, cid, &updated_slots, &mut events);
+                finalize_copy_retarget(state, p, cid, &updated_slots, &mut events)?;
             }
             state.waiting_for.clone()
         }
@@ -3494,7 +3508,7 @@ fn apply_action(
             let p = *player;
             let cid = *copy_id;
             let slots = target_slots.clone();
-            finalize_copy_retarget(state, p, cid, &slots, &mut events);
+            finalize_copy_retarget(state, p, cid, &slots, &mut events)?;
             state.waiting_for.clone()
         }
         // CR 510.1c/d: Combat damage assignment from attacker to blockers.

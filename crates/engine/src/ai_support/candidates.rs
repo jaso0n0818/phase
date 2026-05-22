@@ -1767,16 +1767,20 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     )
                 })
                 .collect();
-            out.push(candidate(
-                GameAction::ChooseTarget { target: None },
-                TacticalClass::Selection,
-                Some(*player),
-            ));
-            out.push(candidate(
-                GameAction::KeepAllCopyTargets,
-                TacticalClass::Selection,
-                Some(*player),
-            ));
+            if slot.current.is_some() {
+                out.push(candidate(
+                    GameAction::ChooseTarget { target: None },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ));
+            }
+            if target_slots.iter().all(|slot| slot.current.is_some()) {
+                out.push(candidate(
+                    GameAction::KeepAllCopyTargets,
+                    TacticalClass::Selection,
+                    Some(*player),
+                ));
+            }
             out
         }
         // CR 510.1c/d: Assign combat damage — greedy (lethal to each in order, remainder to last).
