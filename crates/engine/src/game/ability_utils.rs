@@ -166,7 +166,18 @@ pub fn build_chained_resolved(
     controller: PlayerId,
 ) -> Result<ResolvedAbility, EngineError> {
     if indices.is_empty() {
-        return Err(EngineError::InvalidAction("No modes selected".to_string()));
+        // CR 700.2a: "Choose up to one" permits choosing no modes. The ability
+        // still resolves, but it has no instructions to perform.
+        return Ok(ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: Vec::new(),
+                duration: None,
+                target: None,
+            },
+            Vec::new(),
+            source_id,
+            controller,
+        ));
     }
 
     let mut ordered: Vec<usize> = indices.to_vec();
@@ -3259,6 +3270,30 @@ mod tests {
             }
             other => panic!("expected Maze's End activated ability on stack, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn build_chained_resolved_allows_empty_up_to_mode_selection() {
+        let abilities = vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Bounce {
+                target: TargetFilter::Any,
+                destination: None,
+            },
+        )];
+
+        let resolved = build_chained_resolved(&abilities, &[], ObjectId(1), PlayerId(0)).unwrap();
+
+        assert!(matches!(
+            resolved.effect,
+            Effect::GenericEffect {
+                ref static_abilities,
+                duration: None,
+                target: None,
+            } if static_abilities.is_empty()
+        ));
+        assert!(resolved.targets.is_empty());
+        assert!(resolved.sub_ability.is_none());
     }
 
     #[test]
