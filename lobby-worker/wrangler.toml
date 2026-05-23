@@ -21,3 +21,13 @@ class_name = "LobbyDO"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["LobbyDO"]
+
+# Test first on the automatic *.workers.dev URL (no config needed — just
+# `wrangler deploy`). When ready to serve from your own domain (the phase-rs.dev
+# zone is already on Cloudflare), uncomment this: `custom_domain = true` makes
+# Workers auto-provision the DNS record + TLS cert. Endpoint becomes
+# wss://lobby.phase-rs.dev/ws. Do NOT point the production default at it until
+# the real Rust broker is in (keep phase-server as DEFAULT_SERVER until cutover).
+# [[routes]]
+# pattern = "lobby.phase-rs.dev"
+# custom_domain = true
