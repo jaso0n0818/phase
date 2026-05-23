@@ -4960,6 +4960,23 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         }
     }
 
+    fn parse_source_deals_damage_to_self(input: &str) -> OracleResult<'_, ()> {
+        all_consuming(preceded(
+            alt((tag("whenever "), tag("when "))),
+            value((), (tag("a source "), tag("deals damage to "), tag("~"))),
+        ))
+        .parse(input)
+    }
+
+    // CR 120.3: Damage to this card can cause an ability to trigger.
+    // "this creature" / card name is normalized to ~ before trigger parsing.
+    if parse_source_deals_damage_to_self(lower).is_ok() {
+        let mut def = make_base();
+        def.mode = TriggerMode::DamageReceived;
+        def.valid_card = Some(TargetFilter::SelfRef);
+        return Some((TriggerMode::DamageReceived, def));
+    }
+
     if let Some(result) = try_parse_commit_crime(lower) {
         return Some(result);
     }
@@ -10728,6 +10745,19 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::DamageReceived);
         assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+    }
+
+    #[test]
+    fn trigger_source_deals_damage_to_self() {
+        // Phyrexian Obliterator (NPH/DMR): "Whenever a source deals damage to this creature,
+        // that source's controller sacrifices that many permanents."
+        let def = parse_trigger_line(
+            "Whenever a source deals damage to this creature, that source's controller sacrifices that many permanents of their choice.",
+            "Phyrexian Obliterator",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageReceived);
+        assert_eq!(def.damage_kind, DamageKindFilter::Any);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     }
 
     #[test]
