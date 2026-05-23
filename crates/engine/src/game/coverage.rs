@@ -2069,7 +2069,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Bolster { count } => {
             d.push(("counters".into(), fmt_quantity(count)));
         }
-        Effect::Goad { target } => {
+        Effect::Goad { target } | Effect::GoadAll { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::Detain { target } => {

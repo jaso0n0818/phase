@@ -5974,6 +5974,12 @@ fn try_parse_verb_and_target<'a>(
         let (target, rem) = parse_target_with_ctx(rest, ctx);
         return Some((TargetedImperativeAst::UntapAll { target }, rem));
     }
+    if let Some((_, rest)) = nom_on_lower(text, lower, |i| {
+        value((), alt((tag("goad all "), tag("goad each ")))).parse(i)
+    }) {
+        let (target, rem) = parse_target_with_ctx(rest, ctx);
+        return Some((TargetedImperativeAst::GoadAll { target }, rem));
+    }
     // Simple targeted verbs: parse_target on text after the verb prefix
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("tap ")).parse(i)) {
         let (target_text, _) = strip_optional_target_prefix(rest);
@@ -27379,6 +27385,18 @@ mod tests {
     fn effect_goads_target_creature() {
         let e = parse_effect("goads target creature");
         assert!(matches!(e, Effect::Goad { .. }), "Expected Goad, got {e:?}");
+    }
+
+    #[test]
+    fn effect_goad_all_creatures_you_do_not_control() {
+        let e = parse_effect("Goad all creatures you don't control");
+        let Effect::GoadAll { target } = e else {
+            panic!("Expected GoadAll, got {e:?}");
+        };
+        assert_eq!(
+            target,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent))
+        );
     }
 
     #[test]

@@ -899,6 +899,14 @@ pub(super) fn parse_targeted_action_ast(
         assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::UntapAll { target });
     }
+    if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
+        value((), alt((tag("goad all "), tag("goad each ")))).parse(input)
+    }) {
+        let (target, _rem) = parse_target_with_ctx(rest, ctx);
+        #[cfg(debug_assertions)]
+        assert_no_compound_remainder(_rem, text);
+        return Some(TargetedImperativeAst::GoadAll { target });
+    }
     // CR 701.16a: "sacrifice [count] <filter> [of their choice]" —
     // delegates to `parse_count_expr` so "a"/"an"/"X"/"half the permanents
     // they control" all flow through one authority. "Of their choice" is
@@ -1358,6 +1366,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         TargetedImperativeAst::Untap { target } => Effect::Untap { target },
         TargetedImperativeAst::TapAll { target } => Effect::TapAll { target },
         TargetedImperativeAst::UntapAll { target } => Effect::UntapAll { target },
+        TargetedImperativeAst::GoadAll { target } => Effect::GoadAll { target },
         TargetedImperativeAst::Sacrifice {
             target,
             count,
@@ -5107,6 +5116,17 @@ pub(super) fn parse_imperative_family_ast(
         "goad" | "goads" => {
             let rest = lower[first_word.len()..].trim();
             if !rest.is_empty() {
+                if let Ok((mass_rest, _)) = alt((
+                    tag::<_, _, OracleError<'_>>("all "),
+                    tag::<_, _, OracleError<'_>>("each "),
+                ))
+                .parse(rest)
+                {
+                    let (target, _) = parse_target(mass_rest);
+                    return Some(ImperativeFamilyAst::GainKeyword(Effect::GoadAll {
+                        target,
+                    }));
+                }
                 let (target, _) = parse_target(rest);
                 Some(ImperativeFamilyAst::GainKeyword(Effect::Goad { target }))
             } else {

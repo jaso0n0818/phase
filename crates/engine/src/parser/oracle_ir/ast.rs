@@ -552,6 +552,9 @@ pub(crate) enum TargetedImperativeAst {
     UntapAll {
         target: TargetFilter,
     },
+    GoadAll {
+        target: TargetFilter,
+    },
     Sacrifice {
         target: TargetFilter,
         /// CR 701.16a: Number of permanents to sacrifice. Defaults to
