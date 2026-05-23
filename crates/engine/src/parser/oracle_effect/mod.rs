@@ -5573,6 +5573,20 @@ fn parse_clause_ast(text: &str, ctx: &mut ParseContext) -> ClauseAst {
         }
     }
 
+    // CR 114.1: Emblem text is quoted rules text, not part of the enclosing
+    // sentence grammar. Route emblem creation to the imperative parser before
+    // subject-predicate classification so quoted trigger text like "Whenever an
+    // opponent is dealt ... they lose ..." cannot be mistaken for the outer
+    // effect.
+    {
+        let lower = text.to_lowercase();
+        if try_parse_emblem_creation(&lower, text).is_some() {
+            return ClauseAst::Imperative {
+                text: text.to_string(),
+            };
+        }
+    }
+
     if let Some(ast) = try_parse_subject_predicate_ast(text, ctx) {
         return ast;
     }
@@ -23703,6 +23717,19 @@ mod tests {
                 assert_eq!(t.trigger_zones, vec![Zone::Command]);
             }
             other => panic!("expected CreateEmblem with triggers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_emblem_trigger_with_subject_predicate_text_stays_emblem() {
+        let def = parse_effect_chain(
+            "You get an emblem with \"Whenever an opponent is dealt combat damage by one or more creatures you control, if that player lost less than 8 life this turn, they lose life equal to the difference.\"",
+            AbilityKind::Activated,
+        );
+
+        match &*def.effect {
+            Effect::CreateEmblem { .. } => {}
+            other => panic!("expected CreateEmblem, got {other:?}"),
         }
     }
 
