@@ -11281,7 +11281,7 @@ pub(crate) fn parse_effect_chain_ir(
         // action). Retarget the preceding clause's trailing boundary to `Then`
         // so this clause lowers as a within-action `ContinuationStep` — never a
         // `SequentialSibling` that would resolve even when the opponent accepts.
-        let (text, condition, is_decline_head) =
+        let (text, condition, is_consequence_head) =
             if let Some(body) = strip_for_each_opponent_who_doesnt(&text) {
                 // CR 608.2e: Do NOT stamp `player_scope` on the body — it
                 // inherits the parent `Sacrifice(opponent)` node's
@@ -11301,13 +11301,26 @@ pub(crate) fn parse_effect_chain_ir(
                     }),
                     true,
                 )
+            } else if let Some(body) = strip_for_each_opponent_who_cant(&text) {
+                player_scope = Some(PlayerFilter::Opponent);
+                (
+                    body,
+                    Some(AbilityCondition::QuantityCheck {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount,
+                        },
+                        comparator: Comparator::LT,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    }),
+                    true,
+                )
             } else {
                 (text, condition, false)
             };
         // Recipient rebinds apply to every chunk of the decline-consequence
         // sentence; the `Not{IfYouDo}` condition and `player_scope` only to the
         // head chunk that carried the "for each opponent who doesn't" prefix.
-        let is_decline_consequence = is_decline_head || decline_consequence_active;
+        let is_decline_consequence = is_consequence_head || decline_consequence_active;
 
         let (text, mut unless_pay) = extract_resolution_unless_pay_modifier(&text);
 
@@ -13670,6 +13683,28 @@ fn strip_for_each_opponent_who_doesnt(text: &str) -> Option<String> {
                 alt((
                     tag("for each opponent who doesn't"),
                     tag("for each opponent who does not"),
+                )),
+                preceded(opt(tag(",")), opt(multispace1)),
+            ),
+        )
+        .parse(i)
+    })
+    .map(|((), rest)| rest.to_string())
+}
+
+/// CR 608.2c: Strip a leading "For each opponent who can't, " consequence
+/// prefix. This differs from "who doesn't": no optional decision exists. The
+/// body runs later as a separate per-opponent sibling, gated by that opponent's
+/// previous-effect count being zero.
+fn strip_for_each_opponent_who_cant(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |i| {
+        value(
+            (),
+            preceded(
+                alt((
+                    tag("for each opponent who can't"),
+                    tag("for each opponent who cannot"),
                 )),
                 preceded(opt(tag(",")), opt(multispace1)),
             ),
@@ -28116,6 +28151,44 @@ mod tests {
                 target,
                 &TargetFilter::OriginalController,
                 "\"you draw a card\" is Braids' printed controller"
+            ),
+            other => panic!("expected Draw, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn for_each_opponent_who_cant_uses_previous_discard_count() {
+        use crate::types::ability::SubAbilityLink;
+
+        let def = parse_effect_chain(
+            "Each opponent discards a card. For each opponent who can't, you draw a card.",
+            AbilityKind::Spell,
+        );
+
+        assert!(matches!(*def.effect, Effect::Discard { .. }));
+        assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+
+        let draw = def
+            .sub_ability
+            .as_ref()
+            .expect("discard should chain to the can't consequence");
+        assert_eq!(draw.player_scope, Some(PlayerFilter::Opponent));
+        assert_eq!(draw.sub_link, SubAbilityLink::SequentialSibling);
+        assert_eq!(
+            draw.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                comparator: Comparator::LT,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        );
+        match &*draw.effect {
+            Effect::Draw { target, .. } => assert_eq!(
+                target,
+                &TargetFilter::OriginalController,
+                "\"you draw\" remains the printed controller inside the per-opponent loop"
             ),
             other => panic!("expected Draw, got {other:?}"),
         }

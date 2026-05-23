@@ -3983,7 +3983,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission,
+        AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, Comparator,
         ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, FilterProp,
         GainLifePlayer, ManaSpendPermission, PermissionGrantee, PlayerFilter, PlayerScope, PtValue,
         QuantityExpr, QuantityRef, SpellContext, StaticDefinition, TargetFilter, TargetRef,
@@ -9152,6 +9152,71 @@ mod tests {
         assert_eq!(
             count_none, 0,
             "No opponents in accumulator → count is 0 (controller is excluded)"
+        );
+    }
+
+    #[test]
+    fn per_opponent_cant_discard_consequence_draws_for_zero_count_players() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(2),
+            "Discard Me".to_string(),
+            Zone::Hand,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Draw Me".to_string(),
+            Zone::Library,
+        );
+
+        let mut discard = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        discard.player_scope = Some(PlayerFilter::Opponent);
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::OriginalController,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        draw.player_scope = Some(PlayerFilter::Opponent);
+        draw.condition = Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            comparator: Comparator::LT,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        });
+        discard.sub_ability = Some(Box::new(draw));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &discard, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[0].hand.len(),
+            1,
+            "P0 draws once for P1, the opponent who could not discard"
+        );
+        assert_eq!(
+            state.players[2].hand.len(),
+            0,
+            "P2 discarded their only card and should not add a draw"
         );
     }
 

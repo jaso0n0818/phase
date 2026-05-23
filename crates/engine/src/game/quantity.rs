@@ -1178,8 +1178,15 @@ fn resolve_ref(
             .as_ref()
             .and_then(crate::game::targeting::extract_amount_from_event)
             .or_else(|| {
-                ctx.scoped_player
-                    .and_then(|player| state.last_effect_counts_by_player.get(&player).copied())
+                ctx.scoped_player.and_then(|player| {
+                    (!state.last_effect_counts_by_player.is_empty()).then(|| {
+                        state
+                            .last_effect_counts_by_player
+                            .get(&player)
+                            .copied()
+                            .unwrap_or(0)
+                    })
+                })
             })
             .or(state.last_effect_count)
             .or(state.last_effect_amount)
