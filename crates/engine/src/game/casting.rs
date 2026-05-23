@@ -6480,6 +6480,14 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
     }
 }
 
+fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> {
+    match cost {
+        AbilityCost::OneOf { costs } => Some(costs),
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_one_of_cost),
+        _ => None,
+    }
+}
+
 fn find_return_to_hand_cost(cost: &AbilityCost) -> Option<(u32, Option<&TargetFilter>)> {
     match cost {
         // CR 118.12: This helper currently only handles the default
@@ -7106,6 +7114,19 @@ pub fn handle_activate_ability(
             });
         }
 
+        // CR 118.12a: Pre-check for OneOf costs — detour to WaitingFor before any cost payment.
+        if let Some(costs) = find_one_of_cost(cost) {
+            let mut pending_one_of =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_one_of.activation_cost = Some(cost.clone());
+            pending_one_of.activation_ability_index = Some(ability_index);
+            return Ok(WaitingFor::ActivationCostOneOfChoice {
+                player,
+                costs: costs.clone(),
+                pending_cast: Box::new(pending_one_of),
+            });
+        }
+
         // CR 118.3: Pre-check for ReturnToHand costs — same WaitingFor detour pattern as
         // Sacrifice above. Ordering matters for Composite costs: Sacrifice wins if both are
         // present, but no real cards combine them.
@@ -7407,7 +7428,8 @@ pub fn handle_cancel_cast(
 
 // Cost payment handlers are in casting_costs module.
 pub(crate) use super::casting_costs::{
-    handle_discard_for_cost, handle_return_to_hand_for_cost, handle_sacrifice_for_cost,
+    handle_activation_cost_one_of_choice, handle_discard_for_cost, handle_return_to_hand_for_cost,
+    handle_sacrifice_for_cost,
 };
 
 fn generic_mana_in_cost(cost: &AbilityCost) -> u32 {

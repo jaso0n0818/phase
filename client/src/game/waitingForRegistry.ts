@@ -40,6 +40,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "TargetSelection",
     "TriggerTargetSelection",
     "OptionalCostChoice",
+    "ActivationCostOneOfChoice",
     "DefilerPayment",
     "ModeChoice",
     "AbilityModeChoice",

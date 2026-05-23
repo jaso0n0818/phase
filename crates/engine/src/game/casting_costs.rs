@@ -552,7 +552,60 @@ pub(crate) fn handle_discard_for_cost(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
-/// CR 118.3 + CR 601.2b: Complete sacrifice-as-cost after player selection.
+fn replace_first_one_of_cost(cost: &mut AbilityCost, chosen: AbilityCost) -> bool {
+    match cost {
+        AbilityCost::OneOf { .. } => {
+            *cost = chosen;
+            true
+        }
+        AbilityCost::Composite { costs } => {
+            for cost in costs {
+                if replace_first_one_of_cost(cost, chosen.clone()) {
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// CR 118.12a + CR 602.2b: Complete disjunctive activation-cost branch selection.
+pub(crate) fn handle_activation_cost_one_of_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    costs: &[AbilityCost],
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if index >= costs.len() {
+        return Err(EngineError::InvalidAction(format!(
+            "Invalid OneOf cost branch index: {}",
+            index
+        )));
+    }
+
+    let chosen_cost = &costs[index];
+    if !chosen_cost.is_payable(state, player, pending.object_id) {
+        return Err(EngineError::ActionNotAllowed(
+            "Chosen cost branch is not payable".to_string(),
+        ));
+    }
+
+    let replaced = pending
+        .activation_cost
+        .as_mut()
+        .is_some_and(|cost| replace_first_one_of_cost(cost, chosen_cost.clone()));
+    if !replaced {
+        return Err(EngineError::InvalidAction(
+            "Pending activation cost no longer has a OneOf branch".to_string(),
+        ));
+    }
+
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
 pub(crate) fn handle_sacrifice_for_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -4292,6 +4345,66 @@ mod tests {
             convoked_creatures: Vec::new(),
             payment_mode: CastPaymentMode::Auto,
         }
+    }
+
+    #[test]
+    fn activation_one_of_choice_replaces_nested_first_branch() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            player,
+            "Nested Choice Relic".to_string(),
+            Zone::Battlefield,
+        );
+        let mut pending = make_pending(source);
+        pending.activation_cost = Some(AbilityCost::Composite {
+            costs: vec![AbilityCost::Composite {
+                costs: vec![AbilityCost::OneOf {
+                    costs: vec![
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                        AbilityCost::Mana {
+                            cost: ManaCost::NoCost,
+                        },
+                    ],
+                }],
+            }],
+        });
+        let choices = match pending.activation_cost.as_ref().unwrap() {
+            AbilityCost::Composite { costs } => match &costs[0] {
+                AbilityCost::Composite { costs } => match &costs[0] {
+                    AbilityCost::OneOf { costs } => costs.clone(),
+                    other => panic!("expected nested OneOf, got {other:?}"),
+                },
+                other => panic!("expected nested Composite, got {other:?}"),
+            },
+            other => panic!("expected Composite, got {other:?}"),
+        };
+        let mut events = Vec::new();
+
+        let waiting = handle_activation_cost_one_of_choice(
+            &mut state,
+            player,
+            pending,
+            &choices,
+            1,
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            waiting,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == source),
+            "activation should be pushed after the nested OneOf is replaced and paid"
+        );
     }
 
     #[test]

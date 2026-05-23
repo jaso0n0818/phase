@@ -1329,6 +1329,7 @@ impl GameRunner {
             WaitingFor::CommanderZoneChoice { .. } => "CommanderZoneChoice",
             WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
             WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",
+            WaitingFor::ActivationCostOneOfChoice { .. } => "ActivationCostOneOfChoice",
         }
     }
 

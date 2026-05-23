@@ -1739,6 +1739,29 @@ fn apply_action(
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
         // CR 118.3: Player selected permanents to sacrifice as cost.
         (
+            WaitingFor::ActivationCostOneOfChoice {
+                player,
+                costs,
+                pending_cast,
+            },
+            GameAction::ChooseActivationCostBranch { index },
+        ) => engine_casting::handle_activation_cost_one_of_choice(
+            state,
+            *player,
+            *pending_cast.clone(),
+            costs,
+            index,
+            &mut events,
+        )?,
+        (
+            WaitingFor::ActivationCostOneOfChoice {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        (
             WaitingFor::SacrificeForCost {
                 player,
                 count,

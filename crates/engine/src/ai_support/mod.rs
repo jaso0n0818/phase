@@ -169,6 +169,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             *index >= branches.len()
         }
         (
+            WaitingFor::ActivationCostOneOfChoice {
+                player,
+                costs,
+                pending_cast,
+            },
+            GameAction::ChooseActivationCostBranch { index },
+        ) => costs
+            .get(*index)
+            .is_none_or(|cost| !cost.is_payable(state, *player, pending_cast.object_id)),
+        (
             WaitingFor::DamageSourceChoice { options, .. },
             GameAction::ChooseDamageSource { source },
         ) => !options.contains(source),

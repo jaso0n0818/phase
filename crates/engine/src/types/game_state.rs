@@ -2106,6 +2106,13 @@ pub enum WaitingFor {
         /// The pending cast to resume after the return is complete.
         pending_cast: Box<PendingCast>,
     },
+    /// CR 118.12a: Player must choose which branch of a disjunctive activation cost
+    /// (`AbilityCost::OneOf`) to pay.
+    ActivationCostOneOfChoice {
+        player: PlayerId,
+        costs: Vec<AbilityCost>,
+        pending_cast: Box<PendingCast>,
+    },
     /// CR 118.3 / CR 122.1 / CR 601.2b: Player must choose a permanent to
     /// remove counters from as a cost.
     RemoveCounterForCost {
@@ -2768,6 +2775,7 @@ impl WaitingFor {
             | WaitingFor::DiscardForCost { player, .. }
             | WaitingFor::SacrificeForCost { player, .. }
             | WaitingFor::ReturnToHandForCost { player, .. }
+            | WaitingFor::ActivationCostOneOfChoice { player, .. }
             | WaitingFor::RemoveCounterForCost { player, .. }
             | WaitingFor::BlightChoice { player, .. }
             | WaitingFor::TapCreaturesForSpellCost { player, .. }
@@ -2878,6 +2886,7 @@ impl WaitingFor {
             | WaitingFor::DiscardForCost { pending_cast, .. }
             | WaitingFor::SacrificeForCost { pending_cast, .. }
             | WaitingFor::ReturnToHandForCost { pending_cast, .. }
+            | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
             | WaitingFor::RemoveCounterForCost { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
             | WaitingFor::TapCreaturesForSpellCost { pending_cast, .. }
