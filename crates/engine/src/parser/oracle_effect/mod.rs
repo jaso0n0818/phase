@@ -17,7 +17,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{multispace0, multispace1};
-use nom::combinator::{eof, map, opt, value};
+use nom::combinator::{eof, map, opt, rest, value};
 use nom::multi::many1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -46,13 +46,14 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode,
     CastPermissionConstraint, CastingPermission, ChoiceType, ChooseFromZoneConstraint,
     CombatDamageScope, Comparator, ConjureCard, ContinuousModification, ControllerRef,
-    DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
-    GainLifePlayer, GameRestriction, ManaProduction, ManaSpendPermission, MultiTargetSpec,
-    ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount,
-    PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition,
-    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
+    DamageModification, DamageSource, DelayedTriggerCondition, DoubleTarget, Duration, Effect,
+    FilterProp, GainLifePlayer, GameRestriction, ManaProduction, ManaSpendPermission,
+    MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerScope,
+    PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef,
+    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
+    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TargetSelectionMode, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier, UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -5827,6 +5828,16 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     }
     if matches!(clause.effect, Effect::DealDamage { .. }) && clause.multi_target.is_none() {
         clause.multi_target = extract_deal_damage_multi_target(text);
+    }
+    if matches!(
+        clause.effect,
+        Effect::Double {
+            target_kind: DoubleTarget::Counters { .. },
+            ..
+        }
+    ) && clause.multi_target.is_none()
+    {
+        clause.multi_target = extract_double_counter_multi_target(text);
     }
     clause
 }
@@ -14208,6 +14219,32 @@ fn extract_deal_damage_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
     let after_each_of = strip_after(&lower, "damage to each of ")?;
     let (_, multi_target) = strip_optional_target_prefix(after_each_of);
+    multi_target
+}
+
+fn extract_double_counter_multi_target(text: &str) -> Option<MultiTargetSpec> {
+    let lower = text.to_lowercase();
+    let (_, target_text) = preceded(
+        tag::<_, _, OracleError<'_>>("double the number of each kind of counter on "),
+        rest,
+    )
+    .parse(lower.as_str())
+    .ok()?;
+    if let Ok((after_any_number, _)) =
+        tag::<_, _, OracleError<'_>>("any number of ").parse(target_text)
+    {
+        if alt((
+            tag::<_, _, OracleError<'_>>("target "),
+            tag("other target "),
+            tag("another target "),
+        ))
+        .parse(after_any_number)
+        .is_ok()
+        {
+            return Some(MultiTargetSpec::unlimited(0));
+        }
+    }
+    let (_, multi_target) = strip_optional_target_prefix(target_text);
     multi_target
 }
 
@@ -27294,6 +27331,40 @@ mod tests {
             Effect::Double {
                 target_kind: DoubleTarget::Counters { counter_type: None },
                 ..
+            }
+        ));
+    }
+
+    #[test]
+    fn double_each_kind_of_counter_any_number_target_permanents_is_multi_targeted() {
+        let clause = parse_effect_clause(
+            "double the number of each kind of counter on any number of target permanents",
+            &mut ParseContext::default(),
+        );
+
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::unlimited(0)));
+        assert!(matches!(
+            clause.effect,
+            Effect::Double {
+                target_kind: DoubleTarget::Counters { counter_type: None },
+                target: TargetFilter::Typed(_),
+            }
+        ));
+    }
+
+    #[test]
+    fn double_each_kind_of_counter_up_to_two_creatures_artifacts_is_multi_targeted() {
+        let clause = parse_effect_clause(
+            "double the number of each kind of counter on up to two target creatures and/or artifacts you control",
+            &mut ParseContext::default(),
+        );
+
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 2)));
+        assert!(matches!(
+            clause.effect,
+            Effect::Double {
+                target_kind: DoubleTarget::Counters { counter_type: None },
+                target: TargetFilter::Or { .. },
             }
         ));
     }
