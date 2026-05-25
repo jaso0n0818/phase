@@ -9,6 +9,7 @@
     "holdCtrlBack": "Tieni premuto Ctrl per il retro",
     "holdCtrlFront": "Tieni premuto Ctrl per il fronte",
     "holdCtrlFlip": "Tieni premuto Ctrl per girare",
+    "flip": "Gira",
     "altParsedAbilities": "Alt: abilità analizzate",
     "debugId": "ID: {{id}}",
     "engineParse": "Analisi del motore",

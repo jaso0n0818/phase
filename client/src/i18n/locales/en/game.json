@@ -9,6 +9,7 @@
     "holdCtrlBack": "Hold Ctrl for back face",
     "holdCtrlFront": "Hold Ctrl for front face",
     "holdCtrlFlip": "Hold Ctrl to flip",
+    "flip": "Flip",
     "altParsedAbilities": "Alt: parsed abilities",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine Parse",

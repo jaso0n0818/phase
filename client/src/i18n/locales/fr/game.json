@@ -9,6 +9,7 @@
     "holdCtrlBack": "Maintenez Ctrl pour la face arrière",
     "holdCtrlFront": "Maintenez Ctrl pour la face avant",
     "holdCtrlFlip": "Maintenez Ctrl pour pivoter",
+    "flip": "Pivoter",
     "altParsedAbilities": "Alt : capacités analysées",
     "debugId": "ID : {{id}}",
     "engineParse": "Analyse du moteur",

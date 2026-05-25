@@ -9,6 +9,7 @@
     "holdCtrlBack": "Strg halten für Rückseite",
     "holdCtrlFront": "Strg halten für Vorderseite",
     "holdCtrlFlip": "Strg halten zum Umdrehen",
+    "flip": "Umdrehen",
     "altParsedAbilities": "Alt: eingelesene Fähigkeiten",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine-Parse",

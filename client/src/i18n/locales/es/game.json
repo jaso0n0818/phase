@@ -9,6 +9,7 @@
     "holdCtrlBack": "Mantén Ctrl para la cara trasera",
     "holdCtrlFront": "Mantén Ctrl para la cara frontal",
     "holdCtrlFlip": "Mantén Ctrl para girar",
+    "flip": "Girar",
     "altParsedAbilities": "Alt: habilidades analizadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análisis del motor",
