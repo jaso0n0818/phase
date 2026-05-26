@@ -4626,6 +4626,18 @@ fn subject_is_opponent(subject: &TargetFilter) -> bool {
     )
 }
 
+fn parse_attachment_self_host(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("~"),
+            tag("this creature"),
+            tag("this permanent"),
+        )),
+    )
+    .parse(input)
+}
+
 /// Try to parse an event verb and build a TriggerDefinition from subject + event.
 fn try_parse_event(
     subject: &TargetFilter,
@@ -5299,23 +5311,29 @@ fn try_parse_event(
                 }
             }
             SimpleEvent::BecomesAttached => {
-                // CR 701.3a: "Whenever [this Equipment/Aura] becomes attached to
-                // [a creature / a permanent]" — fires when an Attach or AttachAll
-                // effect resolves and the source is now attached to something.
-                // Non-self subjects need an event payload naming the object that
-                // became attached; EffectResolved only carries the ability source.
-                if !matches!(subject, TargetFilter::SelfRef) {
-                    return None;
-                }
+                // CR 701.3a: Attachment triggers share one data shape:
+                // valid_card = object that became attached, valid_target = host.
                 def.mode = TriggerMode::Attached;
                 def.valid_card = Some(subject.clone());
                 let remaining = remaining.trim();
-                if !remaining.is_empty() {
-                    let (filter, rest) = parse_type_phrase(remaining);
-                    if !rest.trim().is_empty() {
+                if matches!(subject, TargetFilter::SelfRef) {
+                    // Pattern 1: "Whenever ~ becomes attached to [host]"
+                    if !remaining.is_empty() {
+                        let (filter, rest) = parse_type_phrase(remaining);
+                        if !rest.trim().is_empty() {
+                            return None;
+                        }
+                        def.valid_target = Some(filter);
+                    }
+                } else {
+                    // Pattern 2: "Whenever [an Aura] becomes attached to ~"
+                    if all_consuming(parse_attachment_self_host)
+                        .parse(remaining)
+                        .is_err()
+                    {
                         return None;
                     }
-                    def.valid_target = Some(filter);
+                    def.valid_target = Some(TargetFilter::SelfRef);
                 }
             }
         }
@@ -20970,6 +20988,42 @@ mod snapshot_tests {
         );
         assert_eq!(def.mode, TriggerMode::Exerted);
         assert!(def.valid_card.is_some());
+    }
+
+    /// CR 701.3a Pattern 2: "Whenever an Aura becomes attached to ~" —
+    /// the subject is the Aura (not self-ref), the host is the trigger source.
+    /// Cards: Bramble Elemental, Brood Keeper.
+    #[test]
+    fn trigger_an_aura_becomes_attached_to_self() {
+        let def = parse_trigger_line(
+            "Whenever an Aura becomes attached to ~, create two 1/1 green Saproling creature tokens.",
+            "Bramble Elemental",
+        );
+        assert_eq!(def.mode, TriggerMode::Attached);
+        let Some(TargetFilter::Typed(tf)) = &def.valid_card else {
+            panic!("expected typed Aura filter, got {:?}", def.valid_card);
+        };
+        assert!(
+            tf.type_filters
+                .contains(&crate::types::ability::TypeFilter::Subtype(
+                    "Aura".to_string()
+                )),
+            "filter must restrict to Aura subtype, got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::SelfRef));
+    }
+
+    /// CR 701.3a Pattern 2: Brood Keeper uses the same phrase.
+    #[test]
+    fn trigger_an_aura_becomes_attached_to_self_brood_keeper() {
+        let def = parse_trigger_line(
+            "Whenever an Aura becomes attached to ~, create a 2/2 red Dragon creature token with flying. It has \"{R}: This creature gets +1/+0 until end of turn.\"",
+            "Brood Keeper",
+        );
+        assert_eq!(def.mode, TriggerMode::Attached);
+        assert!(def.valid_card.is_some(), "Aura filter must be set");
+        assert_eq!(def.valid_target, Some(TargetFilter::SelfRef));
     }
 
     /// CR 104.3a: "Whenever a player loses the game" — Withengar Unbound,

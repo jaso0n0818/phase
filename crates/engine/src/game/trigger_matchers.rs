@@ -1840,7 +1840,8 @@ pub(super) fn match_exiled(
     }
 }
 
-/// Attached: fires when source becomes attached to a permanent.
+/// CR 701.3a: Attached triggers compare the object that became attached
+/// (`valid_card`) with the host it is attached to (`valid_target`).
 pub(super) fn match_attached(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -1852,20 +1853,26 @@ pub(super) fn match_attached(
             kind: EffectKind::Attach | EffectKind::AttachAll | EffectKind::Equip,
             source_id: event_source_id,
         } => {
-            if !matches!(
+            let attachment_id = if matches!(
                 event,
                 GameEvent::EffectResolved {
                     kind: EffectKind::AttachAll,
                     ..
                 }
-            ) && *event_source_id != source_id
+            ) {
+                source_id
+            } else {
+                *event_source_id
+            };
+
+            if attachment_id != source_id
+                && !matches!(trigger.valid_target, Some(TargetFilter::SelfRef))
             {
                 return false;
             }
-            if !valid_card_matches(trigger, state, source_id, source_id) {
-                return false;
-            }
-            attached_host_matches(trigger, state, source_id)
+
+            valid_card_matches(trigger, state, attachment_id, source_id)
+                && attached_host_matches(trigger, state, attachment_id, source_id)
         }
         _ => false,
     }
@@ -1874,11 +1881,12 @@ pub(super) fn match_attached(
 fn attached_host_matches(
     trigger: &TriggerDefinition,
     state: &GameState,
-    source_id: ObjectId,
+    attachment_id: ObjectId,
+    trigger_source_id: ObjectId,
 ) -> bool {
     let Some(host) = state
         .objects
-        .get(&source_id)
+        .get(&attachment_id)
         .and_then(|obj| obj.attached_to)
     else {
         return false;
@@ -1888,10 +1896,10 @@ fn attached_host_matches(
     };
     match host {
         crate::game::game_object::AttachTarget::Object(object_id) => {
-            target_filter_matches_object(state, object_id, filter, source_id)
+            target_filter_matches_object(state, object_id, filter, trigger_source_id)
         }
         crate::game::game_object::AttachTarget::Player(player_id) => {
-            player_matches_filter(filter, state, player_id, source_id)
+            player_matches_filter(filter, state, player_id, trigger_source_id)
         }
     }
 }
@@ -3341,6 +3349,75 @@ mod tests {
         };
 
         assert!(!match_attached(&event, &trigger, equipment, &state));
+    }
+
+    /// CR 701.3a Pattern 2: "Whenever an Aura becomes attached to ~" fires when
+    /// an Aura (event_source_id) attaches to the trigger source (source_id).
+    /// Cards: Bramble Elemental, Brood Keeper.
+    #[test]
+    fn attached_pattern2_fires_when_aura_attaches_to_host() {
+        let mut state = setup();
+        // host = Bramble Elemental (trigger source)
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bramble Elemental".to_string(),
+            Zone::Battlefield,
+        );
+        // aura = some Aura card
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Rancor".to_string(),
+            Zone::Battlefield,
+        );
+        // Mark the aura as an Enchantment with Aura subtype
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.attached_to = Some(host.into());
+        }
+
+        // Trigger: valid_card = Aura attachment, valid_target = trigger source host.
+        let mut trigger = make_trigger(TriggerMode::Attached);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::default().subtype("Aura".to_string()),
+        ));
+        trigger.valid_target = Some(TargetFilter::SelfRef);
+
+        // Event: Attach resolved with the Aura as source
+        let event = GameEvent::EffectResolved {
+            kind: EffectKind::Attach,
+            source_id: aura,
+        };
+        assert!(
+            match_attached(&event, &trigger, host, &state),
+            "Pattern 2 must fire when an Aura attaches to the trigger source"
+        );
+
+        // Should NOT fire if the aura attaches to a different host
+        let other_host = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(other_host.into());
+        assert!(
+            !match_attached(&event, &trigger, host, &state),
+            "Pattern 2 must not fire when the Aura attaches to a different host"
+        );
+
+        trigger.valid_target = None;
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(host.into());
+        assert!(
+            !match_attached(&event, &trigger, host, &state),
+            "external attachment events must declare the trigger source host"
+        );
     }
 
     #[test]
