@@ -2071,6 +2071,8 @@ pub enum FilterProp {
     },
     /// CR 701.60b: Matches suspected creatures.
     Suspected,
+    /// CR 702.112b: Matches permanents with the renowned designation.
+    Renowned,
     /// CR 510.1c: Matches creatures whose toughness is greater than their power.
     ToughnessGTPower,
     /// Disjunctive composite: the object matches if ANY inner prop matches.
@@ -6563,6 +6565,12 @@ pub enum Effect {
         /// Number of +1/+1 counters to place.
         count: QuantityExpr,
     },
+    /// CR 702.112a: Renown N — if not renowned, put N +1/+1 counters on this
+    /// permanent and it becomes renowned.
+    Renown {
+        /// Number of +1/+1 counters to place.
+        count: QuantityExpr,
+    },
     /// CR 701.39a: Bolster N — choose creature you control with least toughness,
     /// put N +1/+1 counters on it.
     Bolster {
@@ -7421,6 +7429,7 @@ impl Effect {
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
             | Effect::Monstrosity { .. }
+            | Effect::Renown { .. }
             | Effect::Bolster { .. }
             | Effect::Adapt { .. }
             | Effect::Learn
@@ -7605,6 +7614,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Incubate { .. } => "Incubate",
         Effect::Amass { .. } => "Amass",
         Effect::Monstrosity { .. } => "Monstrosity",
+        Effect::Renown { .. } => "Renown",
         Effect::Bolster { .. } => "Bolster",
         Effect::Adapt { .. } => "Adapt",
         Effect::Manifest { .. } => "Manifest",
@@ -7781,6 +7791,7 @@ pub enum EffectKind {
     Incubate,
     Amass,
     Monstrosity,
+    Renown,
     Bolster,
     Adapt,
     Manifest,
@@ -7962,6 +7973,7 @@ impl From<&Effect> for EffectKind {
             Effect::Incubate { .. } => EffectKind::Incubate,
             Effect::Amass { .. } => EffectKind::Amass,
             Effect::Monstrosity { .. } => EffectKind::Monstrosity,
+            Effect::Renown { .. } => EffectKind::Renown,
             Effect::Bolster { .. } => EffectKind::Bolster,
             Effect::Adapt { .. } => EffectKind::Adapt,
             Effect::Manifest { .. } => EffectKind::Manifest,
