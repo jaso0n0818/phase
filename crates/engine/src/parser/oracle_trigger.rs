@@ -18699,7 +18699,7 @@ mod tests {
 
         let bound_qty = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage,
+                filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
             },
         };
 
