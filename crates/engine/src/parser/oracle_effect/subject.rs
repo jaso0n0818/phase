@@ -8,6 +8,7 @@ use nom::Parser;
 use super::animation::{
     animation_modifications_with_replacement, has_in_addition_to_other_types, parse_animation_spec,
 };
+use super::lower::BOUNDED_TARGET_PHRASES;
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
@@ -890,6 +891,18 @@ pub(super) fn parse_subject_application(
             .is_ok()
         {
             return subject_filter_application(TargetFilter::ParentTarget, false);
+        }
+        // CR 115.1d: "each of one or two targets" — bounded multi-target selection
+        // where the effect applies to each chosen target (Prismari Charm).
+        for &(phrase, min, max) in BOUNDED_TARGET_PHRASES {
+            if tag::<_, _, OracleError<'_>>(phrase)
+                .parse(remainder)
+                .is_ok()
+            {
+                let mut application = subject_filter_application(TargetFilter::Any, true)?;
+                application.multi_target = Some(MultiTargetSpec::fixed(min, max));
+                return Some(application);
+            }
         }
         // Fallback: strip "of " and re-route through parse_target as "each <remainder>"
         let normalized = format!("each {remainder}");
