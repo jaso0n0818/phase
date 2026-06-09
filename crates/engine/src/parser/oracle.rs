@@ -2447,6 +2447,7 @@ pub(crate) fn parse_oracle_ir(
                 effect_text,
                 &line,
                 card_name,
+                Some(result.abilities.len()),
                 &mut ctx,
             );
             if ability_cant_be_copied {
@@ -2547,6 +2548,7 @@ pub(crate) fn parse_oracle_ir(
                         activated_effect_text,
                         &line,
                         card_name,
+                        Some(result.abilities.len()),
                         &mut ctx,
                     );
                     result.abilities.push(def);
@@ -3610,6 +3612,7 @@ fn parse_activated_ability_definition(
     effect_text: &str,
     description: &str,
     card_name: &str,
+    current_ability_index: Option<usize>,
     ctx: &mut ParseContext,
 ) -> (AbilityDefinition, String) {
     let (effect_text, constraints) = strip_activated_constraints(effect_text);
@@ -3621,12 +3624,17 @@ fn parse_activated_ability_definition(
     // reference. Restored after the effect parse — no leak to sibling abilities.
     let prev_exile_zone = ctx.current_ability_exile_cost_zone.take();
     ctx.current_ability_exile_cost_zone = non_self_exile_cost_zone(&cost);
+    // CR 707.9a: thread the activated-ability index so "except it has this
+    // ability" inside the effect body resolves to RetainPrintedAbilityFromSource.
+    let prev_ability_index = ctx.current_ability_index;
+    ctx.current_ability_index = current_ability_index;
 
     // Retry with `~` normalization if the first pass left an Unimplemented node
     // or emitted a target-fallback warning.
     let mut def = parse_activated_with_self_ref_fallback(&effect_text, card_name, ctx);
 
     ctx.current_ability_exile_cost_zone = prev_exile_zone;
+    ctx.current_ability_index = prev_ability_index;
     normalize_activated_mana_instead_delta(&mut def);
     if def.activation_zone.is_none() {
         def.activation_zone = activation_zone_from_self_cost(&cost);
@@ -16334,6 +16342,40 @@ mod tests {
                 );
             }
             other => panic!("expected CopyTokenOf at trigger.execute.effect, got {other:?}"),
+        }
+    }
+
+    /// CR 707.9a + CR 602.1: Thespian's Stage "{2}, {T}: becomes a copy of
+    /// target land, except it has this ability" must emit
+    /// `RetainPrintedAbilityFromSource` keyed to the activated ability's index
+    /// in the printed ability list (index 1 — the mana ability is index 0).
+    #[test]
+    fn thespians_stage_emits_retain_printed_ability_from_source() {
+        let r = parse(
+            "{T}: Add {C}.\n{2}, {T}: This land becomes a copy of target land, except it has this ability.",
+            "Thespian's Stage",
+            &[],
+            &["Land"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 2, "mana ability + copy ability");
+        let copy_ability = &r.abilities[1];
+        match &*copy_ability.effect {
+            Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            } => {
+                assert!(
+                    additional_modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::RetainPrintedAbilityFromSource {
+                            source_ability_index: 1
+                        }
+                    )),
+                    "expected RetainPrintedAbilityFromSource(1); got {additional_modifications:?}"
+                );
+            }
+            other => panic!("expected BecomeCopy on second activated ability, got {other:?}"),
         }
     }
 

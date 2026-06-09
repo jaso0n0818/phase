@@ -15670,6 +15670,7 @@ pub(crate) fn parse_effect_chain_ir(
             // reference via `RetainPrintedTriggerFromSource`. Actor, by contrast,
             // is per-chunk (re-derived from each chunk's stripped prefix above).
             current_trigger_index: ctx.current_trigger_index,
+            current_ability_index: ctx.current_ability_index,
             actor: chunk_actor,
             // CR 109.4 + CR 115.1 + CR 506.2: propagate relative-player scope
             // from the trigger condition so "that player controls" inside any

@@ -2708,6 +2708,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::RetainPrintedTriggerFromSource {
             source_trigger_index,
         } => format!("retain printed trigger {source_trigger_index}"),
+        ContinuousModification::RetainPrintedAbilityFromSource {
+            source_ability_index,
+        } => format!("retain printed ability {source_ability_index}"),
         ContinuousModification::AddSupertype { supertype } => {
             format!("add supertype {supertype}")
         }
