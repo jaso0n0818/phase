@@ -10170,17 +10170,18 @@ fn pay_ability_cost_inner(
             }
         }
         // CR 207.2c + CR 602.1: Discard the source card itself as part of the cost (Channel).
-        AbilityCost::Discard { self_ref: true, .. } => {
-            match super::effects::discard::discard_as_cost(state, source_id, player, events) {
-                super::effects::discard::DiscardOutcome::Complete => {}
-                super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
-                    pause_cost_payment_for_replacement_choice(state, choice_player);
-                    return Ok(AbilityCostPaymentOutcome::Paused {
-                        remaining_cost: None,
-                    });
-                }
+        AbilityCost::Discard {
+            self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
+            ..
+        } => match super::effects::discard::discard_as_cost(state, source_id, player, events) {
+            super::effects::discard::DiscardOutcome::Complete => {}
+            super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
+                pause_cost_payment_for_replacement_choice(state, choice_player);
+                return Ok(AbilityCostPaymentOutcome::Paused {
+                    remaining_cost: None,
+                });
             }
-        }
+        },
         // CR 118.3: A self-ref "exile this card" activation cost — the source
         // exiles itself from whatever zone the cost names. Covers exile-from-
         // graveyard costs (CR 702.97a Scavenge, Renew), the exile-from-hand
@@ -10557,7 +10558,7 @@ fn find_non_self_discard(cost: &AbilityCost) -> Option<(&QuantityExpr, Option<&T
         AbilityCost::Discard {
             count,
             filter,
-            self_ref: false,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             ..
         } => Some((count, filter.as_ref())),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_discard),
@@ -10567,7 +10568,10 @@ fn find_non_self_discard(cost: &AbilityCost) -> Option<(&QuantityExpr, Option<&T
 
 fn has_self_ref_discard_cost(cost: &AbilityCost) -> bool {
     match cost {
-        AbilityCost::Discard { self_ref: true, .. } => true,
+        AbilityCost::Discard {
+            self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
+            ..
+        } => true,
         AbilityCost::Composite { costs } => costs.iter().any(has_self_ref_discard_cost),
         _ => false,
     }
@@ -12626,7 +12630,7 @@ mod tests {
             player_data.mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
@@ -12666,7 +12670,7 @@ mod tests {
         player_data.mana_pool.add(ManaUnit {
             color,
             source_id: ObjectId(0),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions,
             grants: vec![],
@@ -13909,7 +13913,7 @@ mod tests {
         let unit = ManaUnit {
             color: ManaType::Red,
             source_id: ObjectId(1),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![],
             grants: vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
@@ -16537,8 +16541,8 @@ mod tests {
                     AbilityCost::Discard {
                         count: QuantityExpr::Fixed { value: 1 },
                         filter: None,
-                        random: false,
-                        self_ref: true,
+                        selection: crate::types::ability::CardSelectionMode::Chosen,
+                        self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
                     },
                     AbilityCost::Mana {
                         cost: ManaCost::Cost {
@@ -16630,8 +16634,8 @@ mod tests {
             .cost(AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: true,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             });
             ability.activation_zone = Some(Zone::Hand);
             Arc::make_mut(&mut obj.abilities).push(ability);
@@ -17045,8 +17049,8 @@ mod tests {
                         AbilityCost::Discard {
                             count: QuantityExpr::Fixed { value: 1 },
                             filter: None,
-                            random: false,
-                            self_ref: false,
+                            selection: crate::types::ability::CardSelectionMode::Chosen,
+                            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                         },
                         AbilityCost::Sacrifice {
                             target: TargetFilter::SelfRef,
@@ -17397,7 +17401,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Black,
             source_id: ObjectId(0),
-            snow: true,
+            supertype: Some(crate::types::mana::ManaSupertype::Snow),
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],
@@ -20820,7 +20824,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -26306,7 +26310,7 @@ mod tests {
                     generic: 0,
                 },
             }],
-            repeatable: false,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         });
         obj.modal.as_mut().unwrap().constraints.push(
             ModalSelectionConstraint::ConditionalMaxChoices {
@@ -26550,7 +26554,7 @@ mod tests {
                         generic: 1,
                     },
                 }],
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             });
             Arc::make_mut(&mut spell.abilities).push(
                 AbilityDefinition::new(
@@ -26562,7 +26566,7 @@ mod tests {
                         owner_library: false,
                         enter_transformed: false,
                         enters_under: None,
-                        enter_tapped: false,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
@@ -26579,7 +26583,7 @@ mod tests {
                             owner_library: false,
                             enter_transformed: false,
                             enters_under: None,
-                            enter_tapped: false,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
@@ -26664,7 +26668,7 @@ mod tests {
                         generic: 2,
                     },
                 }],
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             });
             Arc::make_mut(&mut spell.abilities).push(
                 AbilityDefinition::new(
@@ -27322,7 +27326,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -27486,7 +27490,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -27512,7 +27516,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -27895,7 +27899,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -27911,7 +27915,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -28847,8 +28851,8 @@ mod tests {
                 AbilityCost::Discard {
                     count: QuantityExpr::Fixed { value: 1 },
                     filter: None,
-                    random: false,
-                    self_ref: true,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
                 },
             ],
         };
@@ -38457,7 +38461,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -38488,8 +38492,8 @@ mod tests {
                     AbilityCost::Discard {
                         count: QuantityExpr::Fixed { value: 1 },
                         filter: None,
-                        random: false,
-                        self_ref: true,
+                        selection: crate::types::ability::CardSelectionMode::Chosen,
+                        self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
                     },
                 ],
             });

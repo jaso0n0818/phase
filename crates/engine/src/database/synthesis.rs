@@ -614,7 +614,7 @@ pub fn synthesize_craft(face: &mut CardFace) {
                     // CR 712.14a: "transformed" — the card enters showing its back face.
                     enter_transformed: true,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: Vec::new(),
@@ -1116,7 +1116,7 @@ pub fn synthesize_kicker(face: &mut CardFace) {
     if !costs.is_empty() {
         face.additional_cost = Some(AdditionalCost::Kicker {
             costs,
-            repeatable: false,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         });
     }
 }
@@ -1292,7 +1292,7 @@ pub fn synthesize_buyback(face: &mut CardFace) {
     };
     face.additional_cost = Some(AdditionalCost::Optional {
         cost,
-        repeatable: false,
+        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
     });
 }
 
@@ -1317,7 +1317,7 @@ pub fn synthesize_bargain(face: &mut CardFace) {
             },
             count: 1,
         },
-        repeatable: false,
+        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
     });
 }
 
@@ -1350,7 +1350,7 @@ pub fn synthesize_gift(face: &mut CardFace) {
         cost: AbilityCost::Mana {
             cost: ManaCost::zero(),
         },
-        repeatable: false,
+        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
     });
 
     // Inject GiftDelivery as a wrapper around the first spell ability.
@@ -1416,8 +1416,8 @@ pub fn synthesize_specialize(face: &mut CardFace) {
                                 AbilityCost::Discard {
                                     count: QuantityExpr::Fixed { value: 1 },
                                     filter: Some(specialize_discard_filter()),
-                                    random: false,
-                                    self_ref: false,
+                                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                                 },
                             ],
                         })
@@ -1630,8 +1630,8 @@ pub fn cycling_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefinitio
             let discard_self = AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: true,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             };
             let composite_cost = match cycling_cost {
                 CyclingCost::Mana(cost) => AbilityCost::Composite {
@@ -1669,8 +1669,8 @@ pub fn cycling_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefinitio
                     AbilityCost::Discard {
                         count: QuantityExpr::Fixed { value: 1 },
                         filter: None,
-                        random: false,
-                        self_ref: true,
+                        selection: crate::types::ability::CardSelectionMode::Chosen,
+                        self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
                     },
                 ],
             };
@@ -1690,7 +1690,7 @@ pub fn cycling_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefinitio
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -1749,8 +1749,8 @@ pub fn synthesize_transmute(face: &mut CardFace) {
                         AbilityCost::Discard {
                             count: QuantityExpr::Fixed { value: 1 },
                             filter: None,
-                            random: false,
-                            self_ref: true,
+                            selection: crate::types::ability::CardSelectionMode::Chosen,
+                            self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
                         },
                     ],
                 };
@@ -1772,7 +1772,7 @@ pub fn synthesize_transmute(face: &mut CardFace) {
                         owner_library: false,
                         enter_transformed: false,
                         enters_under: None,
-                        enter_tapped: false,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
@@ -1869,7 +1869,7 @@ pub fn synthesize_transfigure(face: &mut CardFace) {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -2033,8 +2033,8 @@ pub fn synthesize_reinforce(face: &mut CardFace) {
                     AbilityCost::Discard {
                         count: QuantityExpr::Fixed { value: 1 },
                         filter: None,
-                        random: false,
-                        self_ref: true,
+                        selection: crate::types::ability::CardSelectionMode::Chosen,
+                        self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
                     },
                 ],
             };
@@ -2141,7 +2141,7 @@ pub fn synthesize_casualty(face: &mut CardFace) {
                 target: sacrifice_filter,
                 count: 1,
             },
-            repeatable: false,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         });
     }
 
@@ -2219,7 +2219,7 @@ pub fn replicate_copy_ability_definition() -> AbilityDefinition {
 /// Replicate = two abilities (CR 702.56a):
 /// 1. Static ability: "As an additional cost to cast this spell, you may pay
 ///    [cost] any number of times" — modeled as
-///    `AdditionalCost::Optional { repeatable: true, .. }` (same shape as Squad,
+///    `AdditionalCost::Optional { repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable, .. }` (same shape as Squad,
 ///    CR 702.157a).
 /// 2. Triggered ability: "When you cast this spell, if a replicate cost was paid
 ///    for it, copy it for each time its replicate cost was paid. If the spell
@@ -2267,7 +2267,7 @@ pub fn synthesize_replicate(face: &mut CardFace) {
             cost: AbilityCost::Mana {
                 cost: replicate_cost,
             },
-            repeatable: true,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
         });
     }
 
@@ -2445,7 +2445,7 @@ pub fn synthesize_conspire(face: &mut CardFace) {
                 count: 2,
                 filter: conspire_tap_filter(),
             },
-            repeatable: false,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         });
     }
 
@@ -2667,7 +2667,7 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -2736,7 +2736,7 @@ pub fn synthesize_dredge(face: &mut CardFace) {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -3034,7 +3034,7 @@ fn install_etb_copy_on_additional_cost(
 
 /// CR 702.175a: Offspring represents two abilities:
 ///   1. "You may pay an additional [cost] as you cast this spell" — modeled as
-///      `AdditionalCost::Optional { repeatable: false, .. }`.
+///      `AdditionalCost::Optional { repeatability: crate::types::ability::AdditionalCostRepeatability::Once, .. }`.
 ///   2. "When this permanent enters, if its offspring cost was paid, create a
 ///      token that's a copy of it, except it's 1/1." — modeled as an ETB trigger
 ///      with `TriggerCondition::AdditionalCostPaid` and `Effect::CopyTokenOf`
@@ -3056,7 +3056,7 @@ pub fn synthesize_offspring(face: &mut CardFace) {
             cost: AbilityCost::Mana {
                 cost: offspring_cost,
             },
-            repeatable: false,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         },
         AdditionalCostPaymentSource::Any,
         1,
@@ -3107,7 +3107,7 @@ pub fn synthesize_squad(face: &mut CardFace) {
             cost: AbilityCost::Mana {
                 cost: squad_cost,
             },
-            repeatable: true,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
         },
         AdditionalCostPaymentSource::NonKicker,
         0,
@@ -3843,7 +3843,7 @@ fn build_soulshift_trigger(n: u32) -> TriggerDefinition {
         owner_library: false,
         enter_transformed: false,
         enters_under: None,
-        enter_tapped: false,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
@@ -5673,7 +5673,7 @@ fn build_recover_self_change_zone(destination: Zone) -> Effect {
         owner_library: false,
         enter_transformed: false,
         enters_under: None,
-        enter_tapped: false,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
         up_to: false,
         enter_with_counters: Vec::new(),
@@ -5968,7 +5968,7 @@ fn build_dies_return_with_counter_trigger(
         // (false) sends the object to its owner's control. `true` would
         // override to the ability controller's control.
         enters_under: None,
-        enter_tapped: false,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![(counter_type.clone(), QuantityExpr::Fixed { value: 1 })],
@@ -7206,7 +7206,7 @@ fn build_champion_etb_trigger(type_str: &str) -> TriggerDefinition {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: Vec::new(),
@@ -7263,7 +7263,7 @@ fn build_champion_ltb_return_trigger() -> TriggerDefinition {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: Vec::new(),
@@ -8842,7 +8842,7 @@ pub fn synthesize_partner_with(face: &mut CardFace) {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -8973,7 +8973,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -9410,8 +9410,11 @@ mod kicker_synthesis_tests {
         synthesize_kicker(&mut face);
 
         match face.additional_cost.expect("additional_cost set") {
-            AdditionalCost::Kicker { costs, repeatable } => {
-                assert!(!repeatable);
+            AdditionalCost::Kicker {
+                costs,
+                repeatability,
+            } => {
+                assert!(repeatability.is_once());
                 assert_eq!(costs.len(), 1);
                 assert!(matches!(
                     &costs[0],
@@ -9446,7 +9449,7 @@ mod kicker_synthesis_tests {
                         },
                     },
                 ],
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             }),
             triggers: vec![TriggerDefinition::new(TriggerMode::ChangesZone).execute(
                 AbilityDefinition::new(
@@ -9498,7 +9501,7 @@ mod kicker_synthesis_tests {
                         },
                     },
                 ],
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             }),
             replacements: vec![
                 ReplacementDefinition::new(ReplacementEvent::Moved).condition(
@@ -9543,7 +9546,7 @@ mod kicker_synthesis_tests {
                         },
                     },
                 ],
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             }),
             abilities: vec![AbilityDefinition {
                 modal: Some(crate::types::ability::ModalChoice {
@@ -9615,7 +9618,7 @@ mod buyback_synthesis_tests {
         match face.additional_cost.expect("additional_cost set") {
             AdditionalCost::Optional {
                 cost: AbilityCost::Mana { cost },
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             } => {
                 assert!(matches!(
                     cost,
@@ -9647,7 +9650,7 @@ mod buyback_synthesis_tests {
         match face.additional_cost.expect("additional_cost set") {
             AdditionalCost::Optional {
                 cost,
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             } => assert_eq!(cost, sac_cost),
             other => panic!("expected Optional(Sacrifice), got {other:?}"),
         }
@@ -9777,7 +9780,7 @@ mod bargain_synthesis_tests {
         match face.additional_cost.expect("additional_cost set") {
             AdditionalCost::Optional {
                 cost: AbilityCost::Sacrifice { target, count },
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             } => {
                 assert_eq!(count, 1);
                 let TargetFilter::Or { filters } = target else {
@@ -9894,7 +9897,7 @@ mod transmute_synthesis_tests {
                 assert!(costs.iter().any(|c| matches!(
                     c,
                     AbilityCost::Discard {
-                        self_ref: true,
+                        self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
                         count: QuantityExpr::Fixed { value: 1 },
                         ..
                     }
@@ -15133,8 +15136,8 @@ mod cumulative_upkeep_synthesis_tests {
         let discard_kw = Keyword::CumulativeUpkeep(AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
-            random: false,
-            self_ref: false,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
         });
         assert_eq!(
             KeywordTriggerInstaller::triggers_for(&discard_kw).len(),
@@ -17295,7 +17298,7 @@ mod offspring_synthesis_tests {
         match face.additional_cost.as_ref().expect("additional_cost set") {
             AdditionalCost::Optional {
                 cost: AbilityCost::Mana { cost },
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             } => {
                 assert_eq!(*cost, offspring_cost);
             }
@@ -17366,7 +17369,7 @@ mod offspring_synthesis_tests {
                     shards: vec![],
                 },
             }],
-            repeatable: false,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         };
         let mut face = CardFace {
             keywords: vec![Keyword::Offspring(ManaCost::Cost {
@@ -17912,6 +17915,7 @@ mod backup_synthesis_tests {
 #[cfg(test)]
 mod squad_synthesis_tests {
     use super::*;
+    use crate::types::ability::AdditionalCostRepeatability;
     use crate::types::mana::ManaCostShard;
 
     /// CR 702.157a: Squad synthesizes a repeatable optional additional cost and
@@ -17932,7 +17936,7 @@ mod squad_synthesis_tests {
         match face.additional_cost.as_ref().expect("additional_cost set") {
             AdditionalCost::Optional {
                 cost: AbilityCost::Mana { cost },
-                repeatable: true,
+                repeatability: AdditionalCostRepeatability::Repeatable,
             } => {
                 assert_eq!(cost, &squad_cost);
             }
@@ -18025,6 +18029,7 @@ mod squad_synthesis_tests {
 #[cfg(test)]
 mod replicate_synthesis_tests {
     use super::*;
+    use crate::types::ability::AdditionalCostRepeatability;
     use crate::types::mana::ManaCostShard;
 
     /// CR 702.56a: Replicate synthesizes a repeatable optional additional cost
@@ -18046,7 +18051,7 @@ mod replicate_synthesis_tests {
         match face.additional_cost.as_ref().expect("additional_cost set") {
             AdditionalCost::Optional {
                 cost: AbilityCost::Mana { cost },
-                repeatable: true,
+                repeatability: AdditionalCostRepeatability::Repeatable,
             } => {
                 assert_eq!(cost, &replicate_cost);
             }
@@ -18160,7 +18165,7 @@ mod conspire_synthesis_tests {
         match face.additional_cost.as_ref().expect("additional_cost set") {
             AdditionalCost::Optional {
                 cost: AbilityCost::TapCreatures { count, filter },
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             } => {
                 assert_eq!(*count, 2);
                 let TargetFilter::Typed(tf) = filter else {
@@ -21756,8 +21761,8 @@ mod reinforce_synthesis_tests {
                     AbilityCost::Discard {
                         count: QuantityExpr::Fixed { value: 1 },
                         filter: None,
-                        random: false,
-                        self_ref: true,
+                        selection: crate::types::ability::CardSelectionMode::Chosen,
+                        self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
                     }
                 ));
             }

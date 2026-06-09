@@ -737,7 +737,7 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -815,7 +815,7 @@ fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> 
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -1836,7 +1836,7 @@ fn try_parse_self_name_exile(
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -1893,7 +1893,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             destination: Zone::Exile,
             target: mass_target,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             face_down_profile: None,
         }
     } else {
@@ -1904,7 +1904,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -1979,7 +1979,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             owner_library: false,
             enter_transformed: false,
             enters_under: Some(ControllerRef::You),
-            enter_tapped: true,
+            enter_tapped: crate::types::zones::EtbTapState::Tapped,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -3199,7 +3199,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -5361,7 +5361,7 @@ fn try_parse_owner_of_target_shuffle(
         owner_library: true,
         enter_transformed: false,
         enters_under: None,
-        enter_tapped: false,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
@@ -5746,7 +5746,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
             filter,
             kept_destination: Zone::Hand,
             rest_destination: Zone::Library,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,
         }));
@@ -5795,7 +5795,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
         filter,
         kept_destination,
         rest_destination: Zone::Library,
-        enter_tapped: false,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
         kept_optional_to: None,
     }))
@@ -6312,7 +6312,7 @@ fn balance_clause_effect(verb: EqualizeVerb, filter: TargetFilter) -> Effect {
                     right: Box::new(right),
                 },
                 target: TargetFilter::Controller,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             }
@@ -7124,13 +7124,13 @@ fn thread_for_each_subject(effect: Effect, original: &str, ctx: &mut ParseContex
         Effect::Discard {
             count,
             target: TargetFilter::Controller,
-            random,
+            selection,
             unless_filter,
             filter,
         } => Effect::Discard {
             count,
             target,
-            random,
+            selection,
             unless_filter,
             filter,
         },
@@ -7570,7 +7570,7 @@ fn try_parse_return_opponent_choice_from_graveyard(text: &str) -> Option<ParsedE
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -9164,7 +9164,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         owner_library,
         enter_transformed: false,
         enters_under: None,
-        enter_tapped: false,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
@@ -9181,7 +9181,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         owner_library,
         enter_transformed: false,
         enters_under: None,
-        enter_tapped: false,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
@@ -14189,7 +14189,7 @@ fn try_parse_for_each_attacker_copy_blocker(
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -14235,7 +14235,8 @@ fn try_parse_return_target_and_same_name_from_your_graveyard(
     }
     let target =
         add_inferred_origin_constraints_to_target(target, Some(Zone::Graveyard), rest_lower);
-    let enter_tapped = enter_tapped.unwrap_or(false);
+    let enter_tapped =
+        crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped.unwrap_or(false));
     let mut def = AbilityDefinition::new(
         kind,
         Effect::ChangeZone {
@@ -16877,7 +16878,9 @@ fn try_parse_put_zone_change_parts(
                         destination,
                         target,
                         enters_under,
-                        enter_tapped,
+                        enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
+                            enter_tapped,
+                        ),
                         face_down_profile: None,
                     },
                     choice_count,
@@ -16891,7 +16894,7 @@ fn try_parse_put_zone_change_parts(
                     owner_library: false,
                     enter_transformed,
                     enters_under,
-                    enter_tapped,
+                    enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                     enters_attacking,
                     up_to,
                     enter_with_counters,
@@ -21547,7 +21550,7 @@ mod tests {
                     destination: Zone::Exile,
                     target: TargetFilter::Player,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     face_down_profile: None,
                 }
             ),
@@ -21609,7 +21612,7 @@ mod tests {
                     destination: Zone::Graveyard,
                     target: TargetFilter::ExiledBySource,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     face_down_profile: None,
                 }
             ),
@@ -23907,7 +23910,7 @@ mod tests {
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             }
         ));
@@ -23923,7 +23926,7 @@ mod tests {
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             }
         ));
@@ -24107,7 +24110,7 @@ mod tests {
                 assert_eq!(*origin, Some(Zone::Library));
                 assert_eq!(*destination, Zone::Battlefield);
                 assert!(
-                    *enter_tapped,
+                    enter_tapped.is_tapped(),
                     "put-step must set enter_tapped (Oracle: 'onto the battlefield tapped')"
                 );
             }
@@ -27023,7 +27026,10 @@ mod tests {
             );
         };
         assert_eq!(*dest1, crate::types::zones::Zone::Battlefield);
-        assert!(*enter_tapped, "lands must enter battlefield tapped");
+        assert!(
+            enter_tapped.is_tapped(),
+            "lands must enter battlefield tapped"
+        );
         match target1 {
             TargetFilter::TrackedSetFiltered { id: _, filter } => match filter.as_ref() {
                 TargetFilter::Typed(tf) => {
@@ -27092,7 +27098,7 @@ mod tests {
         };
         assert_eq!(*destination, Zone::Battlefield);
         assert_eq!(*enters_under, Some(ControllerRef::You));
-        assert!(*enter_tapped);
+        assert!(enter_tapped.is_tapped());
         assert!(*up_to);
         match target {
             TargetFilter::TrackedSetFiltered { id, filter } => {
@@ -30269,7 +30275,7 @@ mod tests {
         let Effect::RevealHand {
             target,
             count,
-            random,
+            selection,
             ..
         } = &*def.effect
         else {
@@ -30277,7 +30283,7 @@ mod tests {
         };
         assert_eq!(*target, TargetFilter::Player);
         assert_eq!(*count, Some(QuantityExpr::Fixed { value: 1 }));
-        assert!(*random);
+        assert!(selection.is_random());
     }
 
     #[test]
@@ -34952,7 +34958,7 @@ mod tests {
             } => {
                 assert_eq!(origin, Some(Zone::Graveyard));
                 assert_eq!(destination, Zone::Battlefield);
-                assert!(enter_tapped);
+                assert!(enter_tapped.is_tapped());
                 assert!(enters_attacking);
             }
             other => panic!("expected Effect::ChangeZone, got {other:?}"),
@@ -36960,7 +36966,7 @@ mod tests {
                     },
                 },
                 target: TargetFilter::Player,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             },
@@ -37355,7 +37361,7 @@ mod tests {
                     filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
                     kept_destination: Zone::Hand,
                     rest_destination: Zone::Library,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: None,
                 } if type_filters.contains(&TypeFilter::Creature)
@@ -37386,7 +37392,7 @@ mod tests {
                     filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
                     kept_destination: Zone::Hand,
                     rest_destination: Zone::Library,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: None,
                 } if type_filters.contains(&TypeFilter::Creature)
@@ -37462,7 +37468,7 @@ mod tests {
                     filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
                     kept_destination: Zone::Graveyard,
                     rest_destination: Zone::Graveyard,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: None,
                 } if type_filters.contains(&TypeFilter::Land)
@@ -37539,7 +37545,7 @@ mod tests {
                     filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
                     kept_destination: Zone::Battlefield,
                     rest_destination: Zone::Library,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: None,
                 } if type_filters.contains(&TypeFilter::Artifact)
@@ -37584,7 +37590,7 @@ mod tests {
                     player: TargetFilter::ParentTargetController,
                     kept_destination: Zone::Exile,
                     rest_destination: Zone::Library,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: None,
                     ..
@@ -41628,7 +41634,7 @@ mod tests {
             } => {
                 assert_eq!(destination, Zone::Battlefield);
                 assert_eq!(enters_under, Some(ControllerRef::You));
-                assert!(enter_tapped);
+                assert!(enter_tapped.is_tapped());
                 assert_eq!(
                     enter_with_counters,
                     vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 2 })]
@@ -41787,7 +41793,10 @@ mod tests {
                 ..
             } => {
                 assert_eq!(destination, Zone::Battlefield);
-                assert!(enter_tapped, "expected enter_tapped");
+                assert!(
+                    enter_tapped.is_tapped(),
+                    "expected enter_tapped.is_tapped()"
+                );
                 assert!(enters_attacking, "expected enters_attacking");
             }
             other => panic!("expected ChangeZone, got {other:?}"),
@@ -41808,7 +41817,7 @@ mod tests {
                 enters_attacking,
                 ..
             } => {
-                assert!(enter_tapped);
+                assert!(enter_tapped.is_tapped());
                 assert!(enters_attacking);
             }
             other => panic!("expected ChangeZone, got {other:?}"),
@@ -41828,7 +41837,7 @@ mod tests {
                 enters_attacking,
                 ..
             } => {
-                assert!(enter_tapped);
+                assert!(enter_tapped.is_tapped());
                 assert!(enters_attacking);
             }
             other => panic!("expected ChangeZone, got {other:?}"),
@@ -41850,7 +41859,7 @@ mod tests {
                 enters_attacking,
                 ..
             } => {
-                assert!(enter_tapped);
+                assert!(enter_tapped.is_tapped());
                 assert!(enters_attacking);
             }
             other => panic!("expected ChangeZone, got {other:?}"),
@@ -41934,7 +41943,7 @@ mod tests {
                 enters_under,
                 ..
             } => {
-                assert!(enter_tapped);
+                assert!(enter_tapped.is_tapped());
                 assert!(!enters_attacking, "tapped-only must not set attacking");
                 assert_eq!(enters_under, Some(ControllerRef::You));
             }
@@ -41956,7 +41965,7 @@ mod tests {
                 enters_attacking,
                 ..
             } => {
-                assert!(!enter_tapped);
+                assert!(!enter_tapped.is_tapped());
                 assert!(!enters_attacking);
             }
             other => panic!("expected ChangeZone, got {other:?}"),
@@ -41978,7 +41987,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(destination, Zone::Hand);
-                assert!(!enter_tapped);
+                assert!(!enter_tapped.is_tapped());
                 assert!(!enters_attacking);
             }
             other => panic!("expected ChangeZone, got {other:?}"),
@@ -42006,7 +42015,10 @@ mod tests {
             } => {
                 assert_eq!(destination, Zone::Battlefield);
                 assert_eq!(enters_under, Some(ControllerRef::You));
-                assert!(enter_tapped, "expected enter_tapped");
+                assert!(
+                    enter_tapped.is_tapped(),
+                    "expected enter_tapped.is_tapped()"
+                );
                 assert!(enters_attacking, "expected enters_attacking");
             }
             other => panic!("expected ChangeZone, got {other:?}"),
@@ -42030,7 +42042,10 @@ mod tests {
                 ..
             } => {
                 assert_eq!(enters_under, Some(ControllerRef::You));
-                assert!(enter_tapped, "expected enter_tapped");
+                assert!(
+                    enter_tapped.is_tapped(),
+                    "expected enter_tapped.is_tapped()"
+                );
                 assert!(
                     !enters_attacking,
                     "bare tapped without 'and attacking' must not set attacking"
@@ -43488,7 +43503,7 @@ mod snapshot_tests {
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
-                enter_tapped: true,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
                 ..
             } => {}
             other => panic!("expected conditional battlefield put, got {other:?}"),
@@ -43742,7 +43757,7 @@ mod snapshot_tests {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -43795,7 +43810,7 @@ mod snapshot_tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -43880,7 +43895,7 @@ mod snapshot_tests {
         };
         assert_eq!(*origin, Some(Zone::Graveyard));
         assert_eq!(*destination, Zone::Battlefield);
-        assert!(*enter_tapped);
+        assert!(enter_tapped.is_tapped());
         let TargetFilter::Typed(primary) = target else {
             panic!("expected typed primary target, got {target:?}");
         };
@@ -43910,7 +43925,7 @@ mod snapshot_tests {
         assert_eq!(*origin, Some(Zone::Graveyard));
         assert_eq!(*destination, Zone::Battlefield);
         assert_eq!(*enters_under, None);
-        assert!(*enter_tapped);
+        assert!(enter_tapped.is_tapped());
         let TargetFilter::Typed(tail) = target else {
             panic!("expected typed same-name tail, got {target:?}");
         };

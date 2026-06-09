@@ -4214,7 +4214,7 @@ pub(crate) fn attachment_kinds_filter_prop(
         [kind] => FilterProp::HasAttachment {
             kind: kind.clone(),
             controller,
-            exclude_source: false,
+            exclude_source: crate::types::ability::SourceExclusion::Include,
         },
         _ => FilterProp::HasAnyAttachmentOf { kinds, controller },
     }
