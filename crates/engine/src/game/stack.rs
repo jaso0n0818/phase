@@ -1307,6 +1307,12 @@ fn resolve_keyword_action(
             if let Some(mount) = state.objects.get_mut(&mount_id) {
                 if mount.zone == Zone::Battlefield {
                     mount.is_saddled = true;
+                    // CR 702.171c: record the creatures that saddled this permanent.
+                    for creature_id in &paid_creature_ids {
+                        if !mount.saddled_by.contains(creature_id) {
+                            mount.saddled_by.push(*creature_id);
+                        }
+                    }
                 }
             }
             events.push(GameEvent::Saddled {
