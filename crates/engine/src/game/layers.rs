@@ -1130,14 +1130,14 @@ fn rebuild_static_index_at_top() -> bool {
 pub fn evaluate_layers(state: &mut GameState) {
     #[cfg(test)]
     FULL_EVALUATE_LAYERS_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // CR 302.6 + CR 613.1b + CR 702.26c: Snapshot effective controllers for
+    // CR 302.6 + CR 613.1b + CR 702.26b: Snapshot effective controllers for
     // phased-in permanents BEFORE the Step 1 reset below wipes them. The
     // post-pass diff at the end of this function compares against this
     // snapshot to detect effective-controller transitions (Layer 2 control-
     // changing effect start/end, exchange-control, gain-control expiry) and
     // re-applies summoning sickness per CR 302.6 ("continuously under that
     // player's control since that player's most recent turn began").
-    // Phased-out permanents are excluded per CR 702.26c.
+    // Phased-out permanents are excluded per CR 702.26b.
     let prev_controllers: Vec<(ObjectId, PlayerId)> = state
         .battlefield_phased_in_ids()
         .into_iter()
@@ -1153,7 +1153,12 @@ pub fn evaluate_layers(state: &mut GameState) {
     // taken by AI search or snapshot diffing retain their own roots, so this
     // does not break structural sharing across `GameState` clones.
     state.attribution.clear();
-    let bf_ids: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+    // CR 702.26b + CR 702.26e: Phased-out permanents are treated as though
+    // they do not exist and are not included in continuous-effect affected
+    // sets. Exclude them from the whole layer pass so the reset/apply invariant
+    // remains intact; they are frozen until phase-in marks layers dirty and
+    // re-includes them.
+    let bf_ids: Vec<ObjectId> = state.battlefield_phased_in_ids();
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.sync_missing_base_characteristics();
