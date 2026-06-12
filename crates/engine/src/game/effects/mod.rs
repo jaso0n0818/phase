@@ -263,6 +263,10 @@ pub(crate) fn matches_player_scope(
                     // CR 104.5 / CR 800.4: Players who lost have left the game;
                     // this filter is quantity-only and has no live effect recipient.
                     PlayerFilter::HasLostTheGame => false,
+                    // CR 506.2 + CR 508.6: Count-only filter (Suppressor Skyguard's
+                    // intervening-if); it has no live effect-recipient meaning, so
+                    // no player ever matches it as an effect target.
+                    PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => false,
                     // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent
                     // who was dealt combat damage this turn, optionally
                     // restricted to a matching source.
@@ -6011,6 +6015,7 @@ fn scoped_player_matches_filter(
         | PlayerFilter::OwnersOfCardsExiledBySource
         | PlayerFilter::TriggeringPlayer
         | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ControlsCount { .. }

@@ -1081,6 +1081,7 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
             target,
             scope: PreventionScope::AllDamage,
             damage_source_filter: None,
+            prevention_duration: None,
         },
         duration: Some(Duration::UntilEndOfTurn),
         sub_ability: counter_followup.map(Box::new),
@@ -38265,6 +38266,7 @@ mod tests {
                 target,
                 scope,
                 damage_source_filter,
+                ..
             } => {
                 assert_eq!(*amount, PreventionAmount::All);
                 assert!(amount_dynamic.is_none());

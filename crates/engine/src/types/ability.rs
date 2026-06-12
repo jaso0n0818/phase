@@ -4019,6 +4019,12 @@ pub enum PlayerFilter {
     /// event clause. Falls back to plain `Opponent` semantics when no trigger
     /// event is in scope (i.e. only excludes the controller).
     OpponentOtherThanTriggering,
+    /// CR 506.2 + CR 508.6 + CR 603.4: Each opponent of the *triggering/attacking*
+    /// player (resolved from the active AttackersDeclared trigger event) who is NOT
+    /// in that player's attacked-this-combat set. Models "that player has another
+    /// opponent who isn't being attacked" (Suppressor Skyguard); counted via
+    /// QuantityRef::PlayerCount, gated as count >= 1.
+    OpponentOfTriggeringPlayerNotAttacked,
     /// CR 608.2c + CR 701.38: Each player who cast a vote for `choices[choice_index]`
     /// in the most recent vote within the current top-level ability resolution.
     /// Mirrors `PerformedActionThisWay` — backed by a transient ledger
@@ -7873,6 +7879,12 @@ pub enum Effect {
         /// and builds a concrete `HasColor` filter on the shield).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         damage_source_filter: Option<TargetFilter>,
+        /// CR 511.2 + CR 615: Window the prevention shield persists. None = no stated
+        /// window (legacy: shield pruned at end of turn via is_shield). Some(UntilEndOfCombat)
+        /// from "this combat" -> pruned at end of combat so it doesn't bleed into a later
+        /// combat the same turn. Some(UntilEndOfTurn) from "this turn".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prevention_duration: Option<Duration>,
     },
     /// CR 614.9 + CR 614.1a + CR 615: Create a one-shot "the next time [source]
     /// would deal [combat] damage [to X] this turn, [modify/redirect] instead"

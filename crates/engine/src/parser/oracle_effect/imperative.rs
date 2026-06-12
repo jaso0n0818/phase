@@ -3516,6 +3516,16 @@ fn parse_prevent_effect(text: &str) -> Effect {
         PreventionScope::AllDamage
     };
 
+    // CR 511.2 + CR 615: the trailing duration window ("this combat" ->
+    // UntilEndOfCombat, "this turn" -> UntilEndOfTurn) bounds how long the
+    // prevention shield persists. `parse_duration` matches the demonstrative
+    // phrase at the END of the clause (target/scope are scanned mid-string),
+    // so scan word boundaries for it. Absent -> `None` (legacy end-of-turn
+    // prune via `is_shield`).
+    let prevention_duration =
+        nom_primitives::scan_preceded(rest, crate::parser::oracle_nom::duration::parse_duration)
+            .map(|(_, d, _)| d);
+
     // Determine amount: "all damage" vs "the next N damage"
     let amount = if tag::<_, _, OracleError<'_>>("all ").parse(rest).is_ok() {
         PreventionAmount::All
@@ -3553,6 +3563,7 @@ fn parse_prevent_effect(text: &str) -> Effect {
             damage_source_filter: Some(TargetFilter::And {
                 filters: vec![TargetFilter::ParentTargetSlot { index: 0 }, source_filter],
             }),
+            prevention_duration,
         };
     }
 
@@ -3594,6 +3605,7 @@ fn parse_prevent_effect(text: &str) -> Effect {
         target,
         scope,
         damage_source_filter,
+        prevention_duration,
     }
 }
 
@@ -12312,6 +12324,43 @@ mod tests {
             damage_source_filter, None,
             "recipient prevent must not carry a source filter"
         );
+    }
+
+    /// CR 511.2 + CR 615 (issue #2924, Bug B): the trailing duration window on a
+    /// prevent clause is captured into `prevention_duration`. "this combat" ->
+    /// `UntilEndOfCombat` (Suppressor Skyguard — must NOT bleed into a later
+    /// combat the same turn), "this turn" -> `UntilEndOfTurn`, and no stated
+    /// window -> `None` (legacy end-of-turn `is_shield` prune).
+    #[test]
+    fn prevent_clause_captures_trailing_duration_window() {
+        let cases = [
+            (
+                "Prevent all combat damage that would be dealt to you this combat.",
+                Some(Duration::UntilEndOfCombat),
+            ),
+            (
+                "Prevent all combat damage that would be dealt to you this turn.",
+                Some(Duration::UntilEndOfTurn),
+            ),
+            (
+                "Prevent all combat damage that would be dealt to you.",
+                None,
+            ),
+        ];
+        for (text, expected) in cases {
+            let effect = parse_prevent_effect(text);
+            let Effect::PreventDamage {
+                prevention_duration,
+                ..
+            } = effect
+            else {
+                panic!("expected PreventDamage, got {effect:?}");
+            };
+            assert_eq!(
+                prevention_duration, expected,
+                "wrong prevention_duration for {text:?}"
+            );
+        }
     }
 
     /// CR 119.3 + CR 608.2c: Kaya's Wrath lifegain (issue #2943) must parse

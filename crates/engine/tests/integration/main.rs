@@ -257,6 +257,7 @@ mod spikeshell_harrier_speed_superlative;
 mod springheart_nantuko_bestow_landfall;
 mod steadfast_armasaur_lki_toughness;
 mod support;
+mod suppressor_skyguard_prevent_2924;
 mod surveil_rest_pile_redirect_continuation;
 mod swans_prevention_followup;
 mod talon_gates_from_hand_activation;
