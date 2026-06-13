@@ -3642,6 +3642,24 @@ pub(crate) fn drain_deferred_triggers_after_stack_object_announcement(
     drain_deferred_trigger_queue_unchecked(state, events_out)
 }
 
+/// CR 601.2h + CR 603.3b: After a triggered ability finishes construction
+/// (targets/modes chosen) and lands on the stack, drain sibling triggers that
+/// were deferred behind it. Outside an active resolution step, use the
+/// post-announcement drain so cast-triggered abilities (e.g. Dragon's Rage
+/// Channeler on a flashback cast) go on the stack while the triggering spell
+/// remains there (issue #2872). During resolution, use the resolution-boundary
+/// drain instead (issue #1793).
+pub(crate) fn drain_deferred_triggers_after_trigger_construction(
+    state: &mut GameState,
+    events_out: &mut Vec<GameEvent>,
+) -> Option<crate::types::game_state::WaitingFor> {
+    if state.resolving_stack_entry.is_some() {
+        drain_deferred_trigger_queue(state, events_out)
+    } else {
+        drain_deferred_triggers_after_stack_object_announcement(state, events_out)
+    }
+}
+
 fn drain_deferred_trigger_queue_unchecked(
     state: &mut GameState,
     events_out: &mut Vec<GameEvent>,
