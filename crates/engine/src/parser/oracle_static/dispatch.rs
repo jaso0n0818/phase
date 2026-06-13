@@ -54,6 +54,72 @@ fn parse_each_other_players_untap_step_suffix(input: &str) -> OracleResult<'_, (
     .parse(input)
 }
 
+#[derive(Clone, Copy)]
+enum AllPlayerStepSkipSubject {
+    Players,
+    EachPlayer,
+}
+
+fn parse_all_player_step_skip_subject(input: &str) -> OracleResult<'_, AllPlayerStepSkipSubject> {
+    alt((
+        value(AllPlayerStepSkipSubject::Players, tag("players")),
+        value(AllPlayerStepSkipSubject::EachPlayer, tag("each player")),
+    ))
+    .parse(input)
+}
+
+fn parse_all_player_step_skip_verb(
+    subject: AllPlayerStepSkipSubject,
+    input: &str,
+) -> OracleResult<'_, ()> {
+    match subject {
+        AllPlayerStepSkipSubject::Players => value((), tag("skip")).parse(input),
+        AllPlayerStepSkipSubject::EachPlayer => value((), tag("skips")).parse(input),
+    }
+}
+
+fn parse_all_player_skip_step(input: &str) -> OracleResult<'_, Phase> {
+    let (input, subject) = parse_all_player_step_skip_subject(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, _) = parse_all_player_step_skip_verb(subject, input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, _) = tag("their").parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, step) = parse_step_name_nom(input)?;
+    let (input, _) = opt(tag("s")).parse(input)?;
+    Ok((input, step))
+}
+
+fn parse_skip_step_static(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+    // CR 614.1b + CR 614.10: continuous static replacement effects that
+    // replace a named step with nothing. Keep the subject axis explicit so
+    // controller-scoped "your" and all-player "players/their" text share the
+    // same StaticMode without over-broadening either one.
+    let (_, (affected, step)) = all_consuming(terminated(
+        alt((
+            map(
+                preceded(
+                    tag::<_, _, OracleError<'_>>("skip your "),
+                    parse_step_name_nom,
+                ),
+                |step| (TargetFilter::Controller, step),
+            ),
+            map(parse_all_player_skip_step, |step| {
+                (TargetFilter::Player, step)
+            }),
+        )),
+        opt(tag(".")),
+    ))
+    .parse(tp.lower)
+    .ok()?;
+
+    Some(
+        StaticDefinition::new(StaticMode::SkipStep { step })
+            .affected(affected)
+            .description(text.to_string()),
+    )
+}
+
 pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
@@ -389,16 +455,9 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
-    // --- "Skip your [step] step" ---
-    // CR 614.1b + CR 614.10: Replacement effect that replaces the named step with nothing.
-    if let Some(rest_tp) = nom_tag_tp(&tp, "skip your ") {
-        if let Some(step) = parse_step_name(rest_tp.lower.trim_end_matches('.')) {
-            return Some(
-                StaticDefinition::new(StaticMode::SkipStep { step })
-                    .affected(TargetFilter::SelfRef)
-                    .description(text.to_string()),
-            );
-        }
+    // --- "Skip your [step] step" / "Players skip their [step] steps" ---
+    if let Some(def) = parse_skip_step_static(&tp, &text) {
+        return Some(def);
     }
 
     // CR 402.2 + CR 514.1: Maximum hand size modification.

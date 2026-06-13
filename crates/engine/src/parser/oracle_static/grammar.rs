@@ -239,17 +239,13 @@ pub(crate) fn parse_named_color(text: &str) -> Option<ManaColor> {
 }
 
 /// CR 614.1b: Parse a step name from Oracle text using nom combinators.
-pub(crate) fn parse_step_name(input: &str) -> Option<Phase> {
-    use crate::parser::oracle_nom::error::OracleError;
-    let result: Result<(&str, Phase), nom::Err<OracleError<'_>>> = alt((
+pub(crate) fn parse_step_name_nom(input: &str) -> OracleResult<'_, Phase> {
+    alt((
         value(Phase::Draw, tag("draw step")),
         value(Phase::Untap, tag("untap step")),
         value(Phase::Upkeep, tag("upkeep step")),
     ))
-    .parse(input);
-    result
-        .ok()
-        .and_then(|(rest, phase)| rest.is_empty().then_some(phase))
+    .parse(input)
 }
 
 /// CR 205.2a: Check if a lowercase descriptor names a core card type that can modify

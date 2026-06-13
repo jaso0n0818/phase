@@ -1292,16 +1292,28 @@ pub fn should_skip_draw(state: &GameState) -> bool {
         || should_skip_step_static(state, Phase::Draw)
 }
 
-/// CR 614.1b + CR 614.10: Check whether the active player should skip the given step
-/// due to a "skip your [step] step" static ability on a permanent they control.
+/// CR 614.1b + CR 614.10: Check whether the active player should skip the given
+/// step due to a static step-skip replacement that affects them.
 fn should_skip_step_static(state: &GameState, step: Phase) -> bool {
     let active = state.active_player;
+    let context = super::static_abilities::StaticCheckContext {
+        player_id: Some(active),
+        ..Default::default()
+    };
     // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
     state.battlefield.iter().any(|id| {
         state.objects.get(id).is_some_and(|obj| {
-            obj.controller == active
-                && super::functioning_abilities::active_static_definitions(state, obj)
-                    .any(|sd| sd.mode == StaticMode::SkipStep { step })
+            super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
+                if sd.mode != (StaticMode::SkipStep { step }) {
+                    return false;
+                }
+
+                if let Some(ref affected) = sd.affected {
+                    super::static_abilities::static_filter_matches(state, &context, affected, *id)
+                } else {
+                    obj.controller == active
+                }
+            })
         })
     })
 }
@@ -4308,6 +4320,66 @@ mod tests {
             "draw step should be skipped when SkipStep(Draw) static is active"
         );
         assert!(!state.players[0].hand.contains(&card_id));
+    }
+
+    #[test]
+    fn all_player_static_step_skip_affects_noncontroller_active_player() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        state.active_player = PlayerId(1);
+
+        let hub_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Eon Hub".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&hub_id)
+            .unwrap()
+            .static_definitions
+            .push(
+                crate::types::ability::StaticDefinition::new(StaticMode::SkipStep {
+                    step: Phase::Upkeep,
+                })
+                .affected(TargetFilter::Player),
+            );
+
+        assert!(should_skip_step_static(&state, Phase::Upkeep));
+    }
+
+    #[test]
+    fn controller_static_step_skip_does_not_affect_opponent() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        state.active_player = PlayerId(1);
+
+        let enchant_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Necropotence".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&enchant_id)
+            .unwrap()
+            .static_definitions
+            .push(
+                crate::types::ability::StaticDefinition::new(StaticMode::SkipStep {
+                    step: Phase::Draw,
+                })
+                .affected(TargetFilter::Controller),
+            );
+
+        assert!(!should_skip_step_static(&state, Phase::Draw));
     }
 
     #[test]

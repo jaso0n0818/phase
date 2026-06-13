@@ -10357,6 +10357,7 @@ fn negative_dynamic_power() {
 fn skip_draw_step() {
     let def = parse_static_line("Skip your draw step.").unwrap();
     assert_eq!(def.mode, StaticMode::SkipStep { step: Phase::Draw });
+    assert_eq!(def.affected, Some(TargetFilter::Controller));
 }
 
 #[test]
@@ -10374,6 +10375,31 @@ fn skip_upkeep_step() {
             step: Phase::Upkeep
         }
     );
+    assert_eq!(def.affected, Some(TargetFilter::Controller));
+}
+
+#[test]
+fn players_skip_their_upkeep_steps() {
+    let def = parse_static_line("Players skip their upkeep steps.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::SkipStep {
+            step: Phase::Upkeep
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::Player));
+}
+
+#[test]
+fn each_player_skips_their_upkeep_step() {
+    let def = parse_static_line("Each player skips their upkeep step.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::SkipStep {
+            step: Phase::Upkeep
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::Player));
 }
 
 #[test]

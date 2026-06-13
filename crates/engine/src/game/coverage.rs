@@ -31,8 +31,10 @@ use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
+use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::combinator::{all_consuming, value};
+use nom::character::complete::space1;
+use nom::combinator::{all_consuming, opt, value};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1581,14 +1583,61 @@ fn skip_step_phrase(step: Phase) -> Option<&'static str> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CoverageAllPlayerStepSkipSubject {
+    Players,
+    EachPlayer,
+}
+
+fn coverage_all_player_step_skip_subject(
+    input: &str,
+) -> nom::IResult<&str, CoverageAllPlayerStepSkipSubject> {
+    alt((
+        value(CoverageAllPlayerStepSkipSubject::Players, tag("players")),
+        value(
+            CoverageAllPlayerStepSkipSubject::EachPlayer,
+            tag("each player"),
+        ),
+    ))
+    .parse(input)
+}
+
+fn coverage_all_player_step_skip_verb(
+    subject: CoverageAllPlayerStepSkipSubject,
+    input: &str,
+) -> nom::IResult<&str, ()> {
+    match subject {
+        CoverageAllPlayerStepSkipSubject::Players => value((), tag("skip")).parse(input),
+        CoverageAllPlayerStepSkipSubject::EachPlayer => value((), tag("skips")).parse(input),
+    }
+}
+
+fn coverage_all_player_skip_step_line<'a>(
+    input: &'a str,
+    step_phrase: &str,
+) -> nom::IResult<&'a str, ()> {
+    let (input, subject) = coverage_all_player_step_skip_subject(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, _) = coverage_all_player_step_skip_verb(subject, input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, _) = tag("their").parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, _) = tag(step_phrase).parse(input)?;
+    let (input, _) = opt(tag("s")).parse(input)?;
+    let (input, _) = tag(".").parse(input)?;
+    Ok((input, ()))
+}
+
 fn oracle_line_matches_skip_step(effective_lower: &str, step: Phase) -> bool {
     let Some(step_phrase) = skip_step_phrase(step) else {
         return false;
     };
 
-    let result: nom::IResult<&str, ()> =
-        all_consuming(value((), (tag("skip your "), tag(step_phrase), tag("."))))
-            .parse(effective_lower);
+    let result: nom::IResult<&str, ()> = all_consuming(alt((
+        value((), (tag("skip your "), tag(step_phrase), tag("."))),
+        |input| coverage_all_player_skip_step_line(input, step_phrase),
+    )))
+    .parse(effective_lower);
     result.is_ok()
 }
 
@@ -10549,7 +10598,7 @@ mod tests {
         face.oracle_text = Some(oracle.to_string());
         face.static_abilities.push(StaticDefinition {
             mode: StaticMode::SkipStep { step: Phase::Draw },
-            affected: Some(TargetFilter::SelfRef),
+            affected: Some(TargetFilter::Controller),
             modifications: vec![],
             condition: None,
             per_player_condition: None,
@@ -10564,6 +10613,35 @@ mod tests {
         assert!(
             card_face_gaps(&face).is_empty(),
             "'Skip your draw step.' should be covered by SkipStep(Draw) static"
+        );
+    }
+
+    /// CR 614.1b + CR 614.10: Eon Hub's all-player wording is the same
+    /// step-skip replacement mode with player-wide scope.
+    #[test]
+    fn players_skip_upkeep_steps_static_has_no_coverage_gap() {
+        let mut face = make_face();
+        let oracle = "Players skip their upkeep steps.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::SkipStep {
+                step: Phase::Upkeep,
+            },
+            affected: Some(TargetFilter::Player),
+            modifications: vec![],
+            condition: None,
+            per_player_condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some("Players skip their upkeep steps.".to_string()),
+            attack_defended: None,
+        });
+
+        assert!(
+            card_face_gaps(&face).is_empty(),
+            "'Players skip their upkeep steps.' should be covered by SkipStep(Upkeep) static"
         );
     }
 
