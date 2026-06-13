@@ -10856,6 +10856,93 @@ fn cant_draw_opponents() {
 }
 
 #[test]
+fn reveal_hand_opponents() {
+    let def = parse_static_line("Your opponents play with their hands revealed.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn reveal_hand_all_players() {
+    let def = parse_static_line("Players play with their hands revealed.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn reveal_hand_all_players_explicit_subject() {
+    let def = parse_static_line("All players play with their hands revealed.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn reveal_hand_each_player_singular_hand() {
+    let def = parse_static_line("Each player plays with their hand revealed.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn reveal_hand_all_players_with_untapped_condition() {
+    let def =
+        parse_static_line("As long as ~ is untapped, all players play with their hands revealed.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(
+        matches!(
+            def.condition,
+            Some(StaticCondition::Not { ref condition })
+                if matches!(**condition, StaticCondition::SourceIsTapped)
+        ),
+        "expected Not(SourceIsTapped), got {:?}",
+        def.condition
+    );
+}
+
+#[test]
+fn reveal_hand_controller_with_optional_you_subject() {
+    let def = parse_static_line("You play with your hand revealed.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::Controller,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+
+    let imperative = parse_static_line("Play with your hand revealed.").unwrap();
+    assert_eq!(imperative.mode, def.mode);
+    assert_eq!(imperative.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
 fn spell_cost_reduction_uses_card_types_in_graveyard_quantity() {
     let def = parse_static_line(
         "This spell costs {1} less to cast for each card type among cards in your graveyard.",
