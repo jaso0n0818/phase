@@ -1949,8 +1949,8 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                         cost,
                         cast_transformed: false,
                         constraint: None,
-                        // CR 611.2a: `grant_permission::resolve` binds this to
-                        // the ability controller at grant time.
+                        // CR 611.2a: airbend grants cast permission to each
+                        // exiled object's owner, not the airbender's controller.
                         granted_to: None,
                         resolution_cleanup: None,
                         duration: None,
@@ -1959,7 +1959,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
                     },
-                    grantee: Default::default(),
+                    grantee: crate::types::ability::PermissionGrantee::ObjectOwner,
                 },
             )
             .sub_ability(register_bending),
