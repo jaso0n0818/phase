@@ -504,6 +504,22 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
         return results;
     }
 
+    // CR 603.1 + CR 603.2: Disjunctive zone-change triggers ("whenever [A], or [B],
+    // or [C]") must stay a single `TriggerDefinition` with `zone_change_clauses`.
+    // `split_cross_subject_event_compound` mis-splits Syr Konrad's "another creature
+    // dies, or a creature card is put into a graveyard..." at the first ", or "
+    // because the second clause begins with "a creature card". That produces two
+    // separate triggers that can both fire on the same zone-change event, doubling
+    // the damage (issue #3299).
+    if parse_disjunctive_zone_change_condition(&condition).is_some() {
+        return vec![parse_trigger_line_with_index_ir(
+            text,
+            card_name,
+            base_trigger_index,
+            ctx,
+        )];
+    }
+
     // Pattern 2: disjunctive shared-subject event list — "whenever ~ A, B, or C"
     // (N-way serial) or "whenever ~ A or B" (2-way). CR 603.1: each listed event
     // is its own trigger condition, all sharing the one subject.
@@ -12669,6 +12685,32 @@ mod tests {
         assert_eq!(clause.destination, Some(Zone::Battlefield));
         assert_eq!(clause.valid_card, Some(TargetFilter::SelfRef));
         assert!(def.execute.is_some());
+    }
+
+    /// SHAPE TEST — issue #3299: `parse_trigger_lines` must not compound-split
+    /// Syr Konrad's disjunctive zone-change condition into separate triggers.
+    #[test]
+    fn parse_syr_konrad_trigger_lines_stays_single_disjunctive_trigger() {
+        const ORACLE: &str = "Whenever another creature dies, or a creature card \
+            is put into a graveyard from anywhere other than the battlefield, or a \
+            creature card leaves your graveyard, Syr Konrad, the Grim deals 1 damage \
+            to each opponent.";
+        let defs = parse_trigger_lines(ORACLE, "Syr Konrad, the Grim");
+        assert_eq!(
+            defs.len(),
+            1,
+            "expected one disjunctive trigger, got {} triggers: {:?}",
+            defs.len(),
+            defs.iter()
+                .map(|d| d.description.as_deref().unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            defs[0].zone_change_clauses.len(),
+            3,
+            "expected 3 zone_change_clauses, got {:?}",
+            defs[0].zone_change_clauses
+        );
     }
 
     // SHAPE TEST — issue #411: Syr Konrad's three-way disjunctive zone-change
