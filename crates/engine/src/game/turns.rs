@@ -1952,6 +1952,13 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
                     return state.waiting_for.clone();
                 }
+                // CR 603.3b + issue #1350: deferred triggers collapsed during
+                // elimination must drain before advancing past combat damage.
+                if !state.deferred_triggers.is_empty() || state.pending_trigger.is_some() {
+                    return WaitingFor::Priority {
+                        player: state.active_player,
+                    };
+                }
                 // If triggers were placed on the stack (DamageReceived, dies, etc.),
                 // grant priority so they can resolve before advancing.
                 if !state.stack.is_empty() {

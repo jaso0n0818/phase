@@ -133,6 +133,7 @@ mod issue_1337_tekuthal_proliferate_twice;
 mod issue_1343_debug_m1m1_pt;
 mod issue_1345_brash_taunter_self_trigger;
 mod issue_1348_impostor_syndrome;
+mod issue_1350_reaver_cleaver_lethal_elimination;
 mod issue_1353_body_of_knowledge;
 mod issue_1353_death_pits_observer;
 mod issue_1354_coveted_jewel;
