@@ -2625,17 +2625,20 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
             return true;
         }
     }
-    // CR 205.4b: Negated type prefix: "noncreature spell", "nonland permanent"
+    // CR 205.4b: Negated type prefix: "noncreature spell", "nonland permanent",
+    // "non-Saga token" (Good King Mog XII chapter II — issue #3294).
     if let Ok((after_non, _)) = alt((tag::<_, _, OracleError<'_>>("non-"), tag("non"))).parse(text)
     {
-        // Consume the negated word up to whitespace, then check for a core type after.
+        // Consume the negated word up to whitespace, then check for a core type or
+        // standalone "token"/"tokens" after the negation.
         if let Ok((after_space, _)) = (
             take_till::<_, _, OracleError<'_>>(|c: char| c.is_whitespace()),
             tag::<_, _, OracleError<'_>>(" "),
         )
             .parse(after_non)
         {
-            if parse_core_type(after_space).0.is_some() {
+            if parse_core_type(after_space).0.is_some() || parse_token_suffix(after_space).is_some()
+            {
                 return true;
             }
         }
@@ -12339,5 +12342,33 @@ mod tests {
             "expected Named prop with 'Falkenrath Gorger', got {tf:?}"
         );
         assert_eq!(rest.trim_start_matches([',', ' ']), "it gains");
+    }
+
+    #[test]
+    fn parse_non_saga_token_you_control_issue_3294() {
+        use crate::types::ability::{ControllerRef, FilterProp, TypeFilter};
+
+        let (filter, rest) = parse_type_phrase("non-saga token you control");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                    "Saga".to_string()
+                )))),
+            "expected Non(Saga), got {:?}",
+            tf.type_filters
+        );
+        assert!(tf.properties.contains(&FilterProp::Token));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(rest.is_empty(), "expected empty remainder, got {rest:?}");
+
+        let (filter2, rest2) = parse_target("a non-Saga token you control");
+        let TargetFilter::Typed(tf2) = filter2 else {
+            panic!("parse_target must not collapse to Any, got {filter2:?}");
+        };
+        assert!(tf2.properties.contains(&FilterProp::Token));
+        assert!(rest2.is_empty(), "expected empty remainder, got {rest2:?}");
     }
 }
