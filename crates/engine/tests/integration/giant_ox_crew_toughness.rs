@@ -17,7 +17,8 @@ use engine::types::phase::Phase;
 use engine::types::statics::{CrewAction, StaticMode};
 use engine::types::zones::Zone;
 
-const GIANT_OX_ORACLE: &str = "This creature crews Vehicles using its toughness rather than its power.";
+const GIANT_OX_ORACLE: &str =
+    "This creature crews Vehicles using its toughness rather than its power.";
 
 #[test]
 fn giant_ox_parses_crew_contribution_static() {
