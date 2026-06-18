@@ -20,7 +20,13 @@ use engine::types::zones::Zone;
 
 const YARE_ORACLE: &str = "Target creature defending player controls gets +3/+0 until end of turn. That creature can block up to two additional creatures this turn.";
 
-fn create_creature(state: &mut GameState, controller: PlayerId, name: &str, power: i32, toughness: i32) -> engine::types::identifiers::ObjectId {
+fn create_creature(
+    state: &mut GameState,
+    controller: PlayerId,
+    name: &str,
+    power: i32,
+    toughness: i32,
+) -> engine::types::identifiers::ObjectId {
     let id = create_object(
         state,
         CardId(state.next_object_id),
@@ -53,7 +59,10 @@ fn yare_parses_up_to_two_additional_blockers_sub_ability() {
     else {
         panic!("expected GenericEffect, got {:?}", sub.effect);
     };
-    assert_eq!(duration, &Some(engine::types::ability::Duration::UntilEndOfTurn));
+    assert_eq!(
+        duration,
+        &Some(engine::types::ability::Duration::UntilEndOfTurn)
+    );
     assert_eq!(
         static_abilities[0].mode,
         StaticMode::ExtraBlockers { count: Some(2) }
