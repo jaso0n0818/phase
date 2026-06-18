@@ -5957,6 +5957,8 @@ mod tests {
             target: TargetFilter::SelfRef,
             retarget: CopyRetargetPermission::KeepOriginalTargets,
             copier: None,
+            additional_modifications: Vec::new(),
+            starting_loyalty_from_casualty_sacrifice: false,
         };
         let result = parse_followup_continuation_ast(
             "may choose a new target for that copy",
@@ -5986,6 +5988,8 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
         )));
 

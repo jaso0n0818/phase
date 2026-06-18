@@ -17992,6 +17992,8 @@ mod tests {
             target: TargetFilter::Any,
             retarget: crate::types::ability::CopyRetargetPermission::MayChooseNewTargets,
             copier: None,
+            additional_modifications: Vec::new(),
+            starting_loyalty_from_casualty_sacrifice: false,
         };
 
         // A copy was put on the stack → the effect was performed → the negated

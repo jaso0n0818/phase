@@ -7538,6 +7538,14 @@ pub enum Effect {
         /// sibling copy effect.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         copier: Option<ControllerRef>,
+        /// CR 707.9 + CR 707.2: Non-keyword copy exceptions stamped onto spell
+        /// copies at creation (Ob Nixilis: "except the copy isn't legendary").
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        additional_modifications: Vec<ContinuousModification>,
+        /// Ob Nixilis, the Adversary: "has starting loyalty X" where X is the
+        /// sacrificed creature's power when Casualty was paid.
+        #[serde(default)]
+        starting_loyalty_from_casualty_sacrifice: bool,
     },
     /// CR 702.50a + CR 707.10: Epic's recurring upkeep copy. Carries a snapshot
     /// of the Epic spell's resolved ability captured when the Epic spell

@@ -3793,6 +3793,8 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
             target,
             retarget,
             copier: None,
+            additional_modifications: Vec::new(),
+            starting_loyalty_from_casualty_sacrifice: false,
         },
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
         UtilityImperativeAst::Attach { attachment, target } => {

@@ -17469,6 +17469,8 @@ mod tests {
                     },
                     retarget: CopyRetargetPermission::MayChooseNewTargets,
                     copier: None,
+                    additional_modifications: Vec::new(),
+                    starting_loyalty_from_casualty_sacrifice: false,
                 },
             )
             .cost(AbilityCost::Composite {
