@@ -516,7 +516,12 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_the_number_of,
         parse_the_total_mana_value,
         parse_distinct_card_types_exiled_with_source,
-        parse_linked_exile_mana_value_ref,
+        // Group mana-value aggregate parsers to reduce alt arity
+        alt((
+            parse_linked_exile_mana_value_ref,
+            parse_greatest_commander_mana_value_ref,
+            parse_commander_mana_value_ref,
+        )),
         parse_distinct_card_types_in_zone,
         // CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" must
         // precede the generic `among <objects>` arm so the chain-tracked-set,
@@ -656,6 +661,95 @@ fn parse_linked_exile_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRe
             },
         },
     ))
+}
+
+/// CR 202.3: Parse "mana value" or "converted mana cost" phrase.
+fn parse_mana_value_phrase(input: &str) -> OracleResult<'_, ObjectProperty> {
+    let (rest, _) = alt((tag("mana value"), tag("converted mana cost"))).parse(input)?;
+    Ok((rest, ObjectProperty::ManaValue))
+}
+
+/// CR 108.3: Parse ownership phrase - handles "you own" and per-player "they own".
+/// CR 109.5: "they own" in each-player contexts binds to ScopedPlayer (the iterating player),
+/// not Opponent. This ensures "each player ... a commander they own" selects each player's own commander.
+fn parse_commander_owner_phrase(input: &str) -> OracleResult<'_, ControllerRef> {
+    alt((
+        value(ControllerRef::You, tag("you own ")),
+        value(ControllerRef::ScopedPlayer, tag("they own ")),
+    ))
+    .parse(input)
+}
+
+/// CR 903.3d: Parse zone disjunction - "on the battlefield or in the command zone".
+fn parse_commander_zone_disjunction(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = tag("on the battlefield or in the command zone").parse(input)?;
+
+    // Build zone disjunction filter using InAnyZone for efficiency
+    Ok((
+        rest,
+        TargetFilter::Typed(TypedFilter {
+            controller: None,
+            type_filters: vec![],
+            properties: vec![
+                FilterProp::IsCommander,
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Battlefield, Zone::Command],
+                },
+            ],
+        }),
+    ))
+}
+
+/// Parse "the greatest mana value of a commander you own on the battlefield or in the command zone".
+///
+/// CR 202.3: Superlative "greatest" requires aggregate-max.
+/// CR 903.3d: Commander references by zone.
+///
+/// Used for flashback costs with "where X is the greatest mana value of a commander you own
+/// on the battlefield or in the command zone".
+///
+/// Maps to `QuantityRef::Aggregate` with Max function to handle partner commanders.
+fn parse_greatest_commander_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the greatest ").parse(input)?;
+    let (rest, property) = parse_mana_value_phrase(rest)?;
+    let (rest, _) = tag(" of a commander ").parse(rest)?;
+    let (rest, owner) = parse_commander_owner_phrase(rest)?;
+    let (rest, mut zone_filter) = parse_commander_zone_disjunction(rest)?;
+
+    // Add ownership to the zone filter
+    if let TargetFilter::Typed(ref mut tf) = zone_filter {
+        tf.properties.push(FilterProp::Owned {
+            controller: owner.clone(),
+        });
+    }
+
+    Ok((
+        rest,
+        QuantityRef::Aggregate {
+            function: AggregateFunction::Max,
+            property,
+            filter: zone_filter,
+        },
+    ))
+}
+
+/// Parse "the mana value of a commander you own on the battlefield or in the command zone".
+///
+/// CR 202.3: Mana value query without superlative.
+/// CR 903.3d: Commander references by zone.
+///
+/// Used for flashback costs with "where X is the mana value of a commander you own
+/// on the battlefield or in the command zone" (Stinging Study).
+///
+/// Maps to `QuantityRef::CommanderManaValue` to select the first matching commander's mana value.
+fn parse_commander_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the ").parse(input)?;
+    let (rest, _) = parse_mana_value_phrase(rest)?;
+    let (rest, _) = tag(" of a commander ").parse(rest)?;
+    let (rest, owner) = parse_commander_owner_phrase(rest)?;
+    let (rest, _) = parse_commander_zone_disjunction(rest)?;
+
+    Ok((rest, QuantityRef::CommanderManaValue { owner }))
 }
 
 /// CR 122.1: Parse "counters among [filter]" — sum across every counter type.
@@ -6524,6 +6618,50 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn test_parse_greatest_commander_mana_value_ref() {
+        // Test the greatest pattern (CR 202.3 aggregate-max)
+        let phrase = "the greatest mana value of a commander you own on the battlefield or in the command zone";
+        let (rest, q) = parse_quantity_ref(phrase).unwrap();
+        assert_eq!(rest, "", "phrase should be fully consumed");
+
+        // Verify it produces Aggregate with Max function
+        let QuantityRef::Aggregate {
+            function,
+            property,
+            filter,
+        } = q
+        else {
+            panic!("Expected Aggregate, got {q:?}");
+        };
+
+        assert_eq!(function, AggregateFunction::Max);
+        assert_eq!(property, ObjectProperty::ManaValue);
+
+        // Verify the filter uses InAnyZone for multi-zone disjunction
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+
+        assert!(tf.properties.contains(&FilterProp::IsCommander));
+    }
+
+    #[test]
+    fn test_parse_commander_mana_value_ref() {
+        // Test the non-greatest pattern (Stinging Study)
+        let phrase =
+            "the mana value of a commander you own on the battlefield or in the command zone";
+        let (rest, q) = parse_quantity_ref(phrase).unwrap();
+        assert_eq!(rest, "", "phrase should be fully consumed");
+
+        // Verify it produces CommanderManaValue
+        let QuantityRef::CommanderManaValue { owner } = q else {
+            panic!("Expected CommanderManaValue, got {q:?}");
+        };
+
+        assert_eq!(owner, ControllerRef::You);
     }
 
     /// CR 701.17a + CR 701.17c: "the milled card's mana value" routes through
