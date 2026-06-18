@@ -160,6 +160,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // with turns.rs::execute_untap_with_choices keeping a cap clamp as a
             // safety net. Parameterized — no registry entry; coverage support here.
             | StaticMode::MaxUntapPerType { .. }
+            // CR 509.1a + CR 509.1b: ExtraBlockers carries the additional-blocker
+            // count (Yare, Brave the Sands). Runtime enforcement is in
+            // combat.rs::extra_block_limit; the registry only keys Some(1)/None.
+            | StaticMode::ExtraBlockers { .. }
     )
 }
 
