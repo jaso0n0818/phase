@@ -1,26 +1,23 @@
 //! Menace blocking restriction — a creature with menace can only be blocked
-//! by two or more creatures simultaneously (CR 702.110a/b).
+//! by two or more creatures simultaneously (CR 702.111b).
 //!
-//! When a menace attacker faces a defender with only a single potential
-//! blocker, the engine must not offer that attacker as a legal target in the
-//! blocker's `valid_block_targets` list: one creature alone cannot legally
-//! block a menace creature, so the single blocker has no valid assignments.
+//! When a menace attacker faces a defender with only a single blocker
+//! assignment, the engine must reject that declaration: one creature alone
+//! cannot legally block a menace creature.
 //!
 //! This regression pins two complementary behaviors:
-//!   1. With one potential blocker: the menace attacker is absent from
-//!      `valid_block_targets`, and the attacker goes through unblocked
-//!      (dealing combat damage to the defending player).
+//!   1. With one declared blocker: the declaration is rejected, then the
+//!      attacker goes through unblocked (dealing combat damage to the defending
+//!      player).
 //!   2. With two potential blockers: both creatures appear in
 //!      `valid_block_targets` with the menace attacker listed, so the
 //!      defender can legally block with both; the menace creature is blocked
 //!      and deals no damage to the player.
 //!
-//! CR 702.110a: "Menace (This creature can't be blocked except by two or
-//!   more creatures.)"
-//! CR 702.110b: "A creature with menace can't be blocked except by two or
+//! CR 702.111a: "Menace is an evasion ability."
+//! CR 702.111b: "A creature with menace can't be blocked except by two or
 //!   more creatures."
-//! CR 509.1c: "A player is a legal defender of an attacker if that player is
-//!   the defending player and hasn't been assigned as a blocker."
+//! CR 509.1b: blocking declarations that disobey restrictions are illegal.
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
@@ -28,7 +25,7 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::{CombatDamageAssignmentMode, WaitingFor};
 use engine::types::phase::Phase;
 
-/// CR 702.110b: with only a single potential blocker on the battlefield, trying
+/// CR 702.111b: with only a single potential blocker on the battlefield, trying
 /// to assign that lone creature to block the menace attacker must be rejected
 /// by the engine (menace requires two or more simultaneous blockers). After the
 /// illegal assignment is rejected, declaring empty blockers allows the attacker
@@ -106,7 +103,7 @@ fn single_blocker_cannot_block_menace_attacker() {
     );
 }
 
-/// CR 702.110b + CR 509.1b: when the defending player controls TWO or more
+/// CR 702.111b + CR 509.1b: when the defending player controls TWO or more
 /// creatures, both may legally block the menace attacker simultaneously.
 /// After blocking, the menace creature is assigned to two blockers and deals
 /// no combat damage to the player (all damage is distributed among blockers).
@@ -147,13 +144,18 @@ fn menace_attacker_can_be_blocked_by_two_creatures() {
                 bands: vec![],
             }),
             WaitingFor::DeclareBlockers {
-                valid_block_targets, ..
+                valid_block_targets,
+                ..
             } => {
                 // Both blockers must be able to target the menace attacker.
-                let a_targets =
-                    valid_block_targets.get(&blocker_a).cloned().unwrap_or_default();
-                let b_targets =
-                    valid_block_targets.get(&blocker_b).cloned().unwrap_or_default();
+                let a_targets = valid_block_targets
+                    .get(&blocker_a)
+                    .cloned()
+                    .unwrap_or_default();
+                let b_targets = valid_block_targets
+                    .get(&blocker_b)
+                    .cloned()
+                    .unwrap_or_default();
                 assert!(
                     a_targets.contains(&menace_creature),
                     "blocker_a must list the menace attacker as a valid block target \
@@ -166,10 +168,7 @@ fn menace_attacker_can_be_blocked_by_two_creatures() {
                 );
                 // Declare both creatures as blockers — a legal two-creature block.
                 runner.act(GameAction::DeclareBlockers {
-                    assignments: vec![
-                        (blocker_a, menace_creature),
-                        (blocker_b, menace_creature),
-                    ],
+                    assignments: vec![(blocker_a, menace_creature), (blocker_b, menace_creature)],
                 })
             }
             WaitingFor::AssignCombatDamage { .. } => {
