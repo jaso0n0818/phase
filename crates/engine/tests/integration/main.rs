@@ -79,6 +79,7 @@ mod exquisite_blood_routing;
 mod fateful_handoff_target_mana_value_draw;
 mod flickerwisp_delayed_return;
 mod floodpits_drowner;
+mod flowstone_surge_mixed_anthem;
 mod foretell_pipeline;
 mod frenzy_attacker_unblocked_pump;
 mod frostcliff_siege_anchor_word_modes;
