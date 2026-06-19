@@ -5,10 +5,10 @@
 //! block: a self-referential continuous effect gated on a game-state condition
 //! that ALSO conjoins a P/T modification with a keyword grant. Axes:
 //!   - **conditional gate** — the effect is active only while you control a
-//!     Griffin (CR 603.4 state-triggered / CR 611.2 continuous condition),
+//!     Griffin (CR 604.1 static ability / CR 611.3a continuous effect),
 //!   - **conjunction** — +3/+3 (Layer 7c) AND flying (Layer 6) together,
 //!   - **gate toggling** — both effects deactivate when the Griffin leaves
-//!     (CR 611.3).
+//!     (CR 611.3a).
 //!
 //! Drives the REAL parse → synthesis → layer pipeline and reads back the
 //! EFFECTIVE post-`evaluate_layers` power/toughness and keyword set — a runtime
@@ -60,7 +60,7 @@ fn griffin_rider_buff_tracks_griffin_control_gate() {
 
     let mut runner = scenario.build();
 
-    // Gate ON: CR 611.2 — base 2/2 + 3/3 = 5/5, and flying is granted.
+    // Gate ON: CR 611.3a — base 2/2 + 3/3 = 5/5, and flying is granted.
     assert_eq!(
         effective_pt(&mut runner, rider),
         (5, 5),
@@ -71,7 +71,7 @@ fn griffin_rider_buff_tracks_griffin_control_gate() {
         "gate ON: Griffin Rider gains flying while you control a Griffin"
     );
 
-    // Gate OFF: remove the Griffin (CR 611.3) — both the +3/+3 and flying end.
+    // Gate OFF: remove the Griffin (CR 611.3a) — both the +3/+3 and flying end.
     {
         let state = runner.state_mut();
         state.battlefield.retain(|&id| id != griffin);

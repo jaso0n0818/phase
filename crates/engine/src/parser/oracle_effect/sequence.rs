@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
-use nom::character::complete::{multispace0, multispace1};
+use nom::character::complete::multispace1;
 use nom::combinator::{all_consuming, eof, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -1037,6 +1037,15 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         return None;
     }
 
+    // CR 613.4b + CR 611.2a: the no-"and" sibling form ", has base power and
+    // toughness N/N" (e.g. the middle conjunct of "becomes a Spirit, has base
+    // power and toughness 1/1, and gains ...") is a layer-7b continuous
+    // modification, not an independent clause — keep it attached so
+    // parse_continuous_modifications emits SetPower/SetToughness rather than
+    // orphaning it as Unimplemented. Mirrors the bare-"and" guard below.
+    if starts_have_base_power_toughness(trimmed) {
+        return None;
+    }
     if starts_clause_text_or_conjugated(trimmed) || starts_with_damage_clause(&trimmed_lower) {
         return Some((ClauseBoundary::Comma, whitespace_len));
     }
@@ -1049,6 +1058,13 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         if current_ends_with_damage_recipient(&current_lower)
             && starts_with_damage_amount_continuation(after_and)
         {
+            return None;
+        }
+        // CR 613.1d + CR 613.4b: comma-list continuous modifiers such as
+        // "loses all abilities, becomes a Coward ..., and has base power and
+        // toughness 1/1" keep the base-P/T conjunct attached to the same
+        // subject. It is a layer-7b modification, not an independent clause.
+        if starts_have_base_power_toughness(after_and) {
             return None;
         }
         if starts_clause_text_or_conjugated(after_and) || starts_with_damage_clause(after_and) {
@@ -2108,8 +2124,24 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
     .is_ok()
 }
 
-/// CR 707.10c: nom recognizer for the "[you] may choose [a] new target[s] for
+/// CR 707.10c: nom parser for the "[you] may choose [a] new target[s] for
 /// {the,that} copy/copies" continuation clause that grants copy retargeting.
+pub(super) fn parse_copy_retarget_clause(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            opt(alt((tag(", and "), tag("and ")))),
+            opt(tag("you ")),
+            tag("may choose "),
+            alt((tag("a new target "), tag("new targets "))),
+            tag("for "),
+            alt((tag("the copies"), tag("the copy"), tag("that copy"))),
+            opt(alt((tag("."), tag(",")))),
+        ),
+    )
+    .parse(input)
+}
+
 /// Operates on lowercased text; tolerates a trailing period/whitespace.
 ///
 /// The clause is composed from independent axes rather than enumerated as full
@@ -2121,23 +2153,9 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
 ///   - determiner ("the copy/copies" — Fork/Twincast; "that copy" — the Chain
 ///     cycle's "a new target for that copy").
 pub(super) fn recognize_copy_retarget_clause(lower: &str) -> bool {
-    value(
-        (),
-        (
-            multispace0,
-            opt(alt((tag::<_, _, OracleError<'_>>(", and "), tag("and ")))),
-            opt(tag("you ")),
-            tag("may choose "),
-            alt((tag("a new target "), tag("new targets "))),
-            tag("for "),
-            alt((tag("the copies"), tag("the copy"), tag("that copy"))),
-            opt(alt((tag("."), tag(",")))),
-            multispace0,
-            eof,
-        ),
-    )
-    .parse(lower.trim())
-    .is_ok()
+    all_consuming(parse_copy_retarget_clause)
+        .parse(lower.trim())
+        .is_ok()
 }
 
 /// CR 707.10c: Set `retarget` on the (possibly delayed-trigger-wrapped)
@@ -5444,6 +5462,37 @@ mod tests {
             vec![
                 "That creature can't be blocked this turn and has base power and toughness 1/1 until end of turn"
             ]
+        );
+    }
+
+    /// CR 613.1d + CR 613.4b: Curious Colossus — a comma-separated chain with
+    /// additive type change and trailing "and has base power and toughness N/N"
+    /// must stay one continuous-modification clause so the target/affected
+    /// subject applies to every layer-4/6/7b modification.
+    #[test]
+    fn comma_and_does_not_split_type_change_and_has_base_pt() {
+        let chunks = clause_texts(
+            "each creature target opponent controls loses all abilities, becomes a Coward in addition to its other types, and has base power and toughness 1/1",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "each creature target opponent controls loses all abilities, becomes a Coward in addition to its other types, and has base power and toughness 1/1"
+            ]
+        );
+    }
+
+    /// CR 613.4b: the no-"and" sibling form ", has base power and toughness N/N"
+    /// (the middle conjunct of e.g. "becomes a Spirit, has base power and
+    /// toughness 1/1, and gains ...") must also stay attached — the bare-"and"
+    /// guard above only covers the trailing ", and has ..." form.
+    #[test]
+    fn comma_no_and_does_not_split_has_base_pt() {
+        let chunks =
+            clause_texts("target creature loses all abilities, has base power and toughness 2/2");
+        assert_eq!(
+            chunks,
+            vec!["target creature loses all abilities, has base power and toughness 2/2"]
         );
     }
 
