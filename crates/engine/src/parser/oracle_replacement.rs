@@ -97,6 +97,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- "As ~ is turned face up, [effect]" → TurnFaceUp replacement (megamorph/
+    //     disguise). CR 614.1e + CR 708.11: the effect applies as the permanent is
+    //     turned face up, so it is a replacement, not a stack triggered ability. ---
+    if let Some(def) = parse_turned_face_up_replacement(&norm_lower, &text) {
+        return Some(def);
+    }
+
     // --- The Mimeoplasm: "As ~ enters, you may exile N cards from graveyards. If you do, ..." ---
     // Check before other "as enters" patterns to ensure it matches correctly
     if let Some(def) = parse_as_enters_exile_from_graveyards(&norm_lower, &normalized, &text) {
@@ -319,6 +326,15 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // (Twists and Turns / Topography Tracker class).
     if nom_primitives::scan_contains(&lower, "would explore") {
         if let Some(def) = parse_explore_replacement(&lower, &text) {
+            return Some(def);
+        }
+    }
+
+    // --- Untap-step replacement: "If [filter] would untap during [its
+    // controller's | your] untap step, [effect] instead" (Freyalise's Winds,
+    // Edge of Malacol). CR 502.3 + CR 502.4 + CR 614.1a.
+    if nom_primitives::scan_contains(&lower, "would untap during") {
+        if let Some(def) = parse_untap_step_replacement(&text, &lower) {
             return Some(def);
         }
     }
@@ -4006,7 +4022,7 @@ fn parse_damage_modification_static(
     let (_, (_, after_that)) = nom_primitives::split_once_on(norm_lower, "that ").ok()?;
     let (_, (subject, _)) = nom_primitives::split_once_on(after_that, " would deal").ok()?;
 
-    let source_filter = parse_damage_source_subject(subject.trim());
+    let source_filter = parse_damage_source_subject_filter(subject.trim());
 
     // --- 3. Extract combat scope ---
     let combat_scope = scan_combat_scope(norm_lower);
@@ -4372,13 +4388,22 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
         return None;
     }
 
+    if let Some(filter) = parse_damage_source_subject_filter(subject) {
+        return Some(filter);
+    }
+
+    None
+}
+
+fn parse_damage_source_subject_filter(subject: &str) -> Option<TargetFilter> {
     if let Some(filter) = parse_damage_source_subject(subject) {
         return Some(filter);
     }
 
-    // CR 614.1a: Typed damage sources ("creature you control with a +1/+1
-    // counter on it", …) — delegate to the shared type-phrase parser
-    // (Uncivil Unrest, Torbran-adjacent prints).
+    // Typed damage sources ("creature you control with a +1/+1 counter on it",
+    // "creatures you control with counters on them", ...) share the normal
+    // target grammar; damage replacement parsing should not maintain a parallel
+    // counter/property grammar.
     let (filter, rest) = parse_type_phrase(subject);
     if rest.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
         return Some(filter);
@@ -4756,9 +4781,17 @@ fn extract_replacement_effect(text: &str) -> Option<String> {
         let effect = TextPair::new(effect, &lower)
             .trim_end()
             .trim_end_matches('.');
+        // Strip trailing "... instead" marker (e.g., "draw two cards instead.").
         let effect = effect
             .strip_suffix(" instead")
             .map_or(effect, |trimmed| trimmed.trim_end());
+        // CR 614.1a: Strip leading "instead ..." marker (e.g., "instead you
+        // draw two cards"). This form appears when the subject follows the
+        // replacement word, as in Blood Scrivener: "..., instead you draw two
+        // cards and you lose 1 life."
+        let effect = effect
+            .strip_prefix("instead ") // allow-noncombinator: TextPair structural cleanup on an already-extracted replacement effect fragment, mirroring the trailing "instead" strip above.
+            .map_or(effect, |stripped| stripped.trim_start());
         if !effect.original.is_empty() {
             return Some(effect.original.to_string());
         }
@@ -5001,6 +5034,121 @@ fn parse_explore_replacement(lower: &str, original_text: &str) -> Option<Replace
                 TypedFilter::creature().controller(ControllerRef::You),
             ))
             .execute(parse_effect_chain(execute_text, AbilityKind::Spell))
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 502.3 + CR 502.4 + CR 614.1a: untap-step replacement —
+/// "If [filter] would untap during [its controller's | your] untap step,
+/// [effect] instead" (Freyalise's Winds, Edge of Malacol). The `valid_card`
+/// filter scopes WHICH permanent (parsed generically via `parse_type_phrase`),
+/// and `ReplacementCondition::DuringUntapStep` scopes WHEN (so effect-untaps at
+/// other times are unaffected). The alternative effect appears BEFORE "instead"
+/// ("remove all wind counters from it instead", "put two +1/+1 counters on it
+/// instead").
+/// CR 614.1e + CR 708.11: "As ~ is turned face up, [effect]"
+/// is a replacement effect — the alternative action applies AS the permanent is
+/// turned face up (no stack-response window), and the subject is always the
+/// permanent itself. Scoped to effects that resolve against the permanent itself
+/// (`SelfRef`): the self-counter class — Hooded Hydra "put five +1/+1 counters on
+/// it", Bubble Smuggler "put four +1/+1 counters on it". Forms that need an
+/// external target choice during the turn-up (Gift of Doom "you may attach it to
+/// a creature") are gapped by `turn_face_up_effect_is_self_resolving` rather than
+/// mis-resolved. `norm_lower` has self-references normalized to `~`.
+fn parse_turned_face_up_replacement(norm_lower: &str, text: &str) -> Option<ReplacementDefinition> {
+    // Anchored self-referential lead.
+    tag::<_, _, OracleError<'_>>("as ~ is turned face up, ")
+        .parse(norm_lower)
+        .ok()?;
+    // The effect is everything after the lead; pull it from the original line so
+    // `parse_effect_chain` sees the printed casing.
+    let lower = text.to_lowercase();
+    let (_head, effect_text) = split_once_on_lower(text, &lower, " is turned face up, ")?;
+    let effect_text = effect_text.trim().trim_end_matches('.').trim();
+    if effect_text.is_empty() {
+        return None;
+    }
+
+    // CR 708.11: the effect applies AS the permanent is turned face up — there is
+    // no point at which the controller can use the targeting system. Only effects
+    // that resolve against the permanent itself (`SelfRef`, e.g. Hooded Hydra's
+    // "put five +1/+1 counters on it") can be faithfully modeled at this seam.
+    // Effects that need an external target choice (Gift of Doom's "you may attach
+    // it to a creature") would require a turn-up-time choice the apply path does
+    // not provide; gap them rather than silently mis-resolve the host.
+    let execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+    if !turn_face_up_effect_is_self_resolving(&execute) {
+        return None;
+    }
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(execute)
+            .description(text.to_string()),
+    )
+}
+
+/// CR 708.11: True when every effect in an "As ~ is turned face up" chain resolves
+/// against the permanent itself (`SelfRef`) or needs no target at all, so it can
+/// be applied during the turn-up with no targeting window. An effect whose target
+/// is an external filter (a creature/permanent/player chosen at resolution) needs
+/// a choice the replacement-apply path does not model and must be gapped.
+fn turn_face_up_effect_is_self_resolving(ability: &AbilityDefinition) -> bool {
+    let mut current = Some(ability);
+    while let Some(def) = current {
+        match def.effect.target_filter() {
+            None | Some(TargetFilter::SelfRef) => {}
+            Some(_) => return false,
+        }
+        current = def.sub_ability.as_deref();
+    }
+    true
+}
+
+fn parse_untap_step_replacement(original_text: &str, lower: &str) -> Option<ReplacementDefinition> {
+    if !nom_primitives::scan_contains(lower, "untap step")
+        || !nom_primitives::scan_contains(lower, "instead")
+    {
+        return None;
+    }
+
+    // Subject filter: between "if " and " would untap during".
+    let (head, after_would) = split_once_on_lower(original_text, lower, " would untap during ")?;
+    // Self-reference untap clauses ("~ would untap") are handled elsewhere.
+    if head.contains('~') {
+        return None;
+    }
+    // CR 614.1a: consume the leading "if " with a `tag` combinator, then parse
+    // the subject as a typed filter (lowercase, as `parse_type_phrase` expects).
+    let head_lc = head.trim().to_ascii_lowercase();
+    let (subject_lc, _) = tag::<_, _, OracleError<'_>>("if ")
+        .parse(head_lc.as_str())
+        .ok()?;
+    let (filter, subject_rest) = parse_type_phrase(subject_lc.trim());
+    if matches!(&filter, TargetFilter::Any) || !subject_rest.trim().is_empty() {
+        return None;
+    }
+
+    // Skip past "[its controller's | your] untap step" to the alternative effect.
+    let after_would_lc = after_would.to_ascii_lowercase();
+    let (_step_owner, after_step) =
+        split_once_on_lower(after_would, &after_would_lc, "untap step")?;
+    let after_step = after_step.trim_start_matches([',', ' ']);
+
+    // Effect is the text before " instead".
+    let after_step_lc = after_step.to_ascii_lowercase();
+    let (effect_text, _) = split_once_on_lower(after_step, &after_step_lc, "instead")?;
+    let effect_text = effect_text.trim().trim_end_matches([',', ' ']);
+    if effect_text.is_empty() {
+        return None;
+    }
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Untap)
+            .valid_card(filter)
+            .condition(ReplacementCondition::DuringUntapStep)
+            .execute(parse_effect_chain(effect_text, AbilityKind::Spell))
             .description(original_text.to_string()),
     )
 }
@@ -7142,6 +7290,83 @@ mod tests {
             }
             other => panic!("expected MayCost, got {other:?}"),
         }
+    }
+
+    /// CR 502.3 + CR 502.4 + CR 614.1a: untap-step replacement. Edge of Malacol
+    /// "If a creature you control would untap during your untap step, put two
+    /// +1/+1 counters on it instead." gates to the untap step (so effect-untaps
+    /// elsewhere are unaffected) and keeps the alternative effect.
+    #[test]
+    fn untap_step_replacement_edge_of_malacol() {
+        let def = parse_replacement_line(
+            "If a creature you control would untap during your untap step, put two +1/+1 counters on it instead.",
+            "Edge of Malacol",
+        )
+        .expect("untap-step replacement should parse");
+        assert_eq!(def.event, ReplacementEvent::Untap);
+        assert_eq!(def.condition, Some(ReplacementCondition::DuringUntapStep));
+        assert!(
+            def.execute.is_some(),
+            "alternative effect (+1/+1 counters) must not be dropped"
+        );
+        assert!(
+            def.valid_card.is_some(),
+            "valid_card filter (a creature you control) should be set"
+        );
+    }
+
+    /// CR 502.3 + CR 614.1a: untap-step replacement with a counter-filtered
+    /// subject — Freyalise's Winds "If a permanent with a wind counter on it
+    /// would untap during its controller's untap step, remove all wind counters
+    /// from it instead."
+    #[test]
+    fn untap_step_replacement_freyalises_winds() {
+        let def = parse_replacement_line(
+            "If a permanent with a wind counter on it would untap during its controller's untap step, remove all wind counters from it instead.",
+            "Freyalise's Winds",
+        )
+        .expect("counter-filtered untap-step replacement should parse");
+        assert_eq!(def.event, ReplacementEvent::Untap);
+        assert_eq!(def.condition, Some(ReplacementCondition::DuringUntapStep));
+        assert!(def.execute.is_some());
+    }
+
+    #[test]
+    fn turned_face_up_replacement_megamorph() {
+        // CR 614.1e + CR 708.11: "As ~ is turned face up,
+        // [effect]" is a TurnFaceUp REPLACEMENT (applies as the permanent is
+        // turned up — no stack trigger), bound to the permanent itself.
+        let def = parse_replacement_line(
+            "As this creature is turned face up, put five +1/+1 counters on it.",
+            "Hooded Hydra",
+        )
+        .expect("turn-face-up replacement should parse");
+        assert_eq!(def.event, ReplacementEvent::TurnFaceUp);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        let execute = def.execute.expect("alternative effect must be parsed");
+        assert!(
+            matches!(&*execute.effect, Effect::PutCounter { .. }),
+            "expected PutCounter, got {:?}",
+            execute.effect
+        );
+    }
+
+    #[test]
+    fn turned_face_up_replacement_gaps_external_target_choice() {
+        // CR 708.11: an "As ~ is turned face up" effect applies during the
+        // turn-up with no targeting window. Gift of Doom's "you may attach it to a
+        // creature" needs an external host choice that cannot be made there, so it
+        // must NOT be modeled as a TurnFaceUp replacement (gapped honestly rather
+        // than mis-resolving the host) — only the self-resolving `SelfRef` class is.
+        let def = parse_replacement_line(
+            "As this permanent is turned face up, you may attach it to a creature.",
+            "Gift of Doom",
+        );
+        assert!(
+            !def.as_ref()
+                .is_some_and(|d| d.event == ReplacementEvent::TurnFaceUp),
+            "attach-to-external-creature must be gapped, got {def:?}"
+        );
     }
 
     /// CR 614.12a: Karoo artifact — Mox Diamond's "you may discard ..." cost.
@@ -10836,6 +11061,36 @@ mod tests {
     }
 
     #[test]
+    fn damage_double_all_typed_subject_with_counters() {
+        let def = parse_replacement_line(
+            "Double all damage that creatures you control with counters on them would deal.",
+            "Raphael, the Muscle",
+        )
+        .expect("typed no-instead damage doubler should parse");
+        assert_eq!(def.damage_modification, Some(DamageModification::Double));
+        let Some(TargetFilter::Typed(tf)) = def.damage_source_filter else {
+            panic!(
+                "expected typed damage source filter, got {:?}",
+                def.damage_source_filter
+            );
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Counters {
+                    counters: CounterMatch::Any,
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }
+            )),
+            "expected any-counter qualifier, got {:?}",
+            tf.properties
+        );
+    }
+
+    #[test]
     fn damage_double_all_goblin_sources() {
         // Type-filtered variant
         let def = parse_replacement_line(
@@ -11810,6 +12065,56 @@ mod tests {
                     qty: QuantityRef::EventContextAmount
                 }
             ) && *offset == 1
+        ));
+    }
+
+    #[test]
+    fn draw_replacement_leading_instead_prefix_blood_scrivener() {
+        // CR 614.1a: "instead you draw two cards" — leading "instead" form with
+        // subject prefix. The replacement must wire up Draw {count:2} as the
+        // execute effect and LoseLife as a sub_ability, gated on HandSize == 0.
+        // Regression test for issue #3305: "instead" was not stripped from the
+        // effect text, leaving the draw as Unimplemented and only the life loss
+        // fired.
+        let def = parse_replacement_line(
+            "If you would draw a card while you have no cards in hand, instead you draw two cards and you lose 1 life.",
+            "Blood Scrivener",
+        )
+        .unwrap();
+
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        // Gate: HandSize EQ 0
+        assert!(matches!(
+            &def.condition,
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller
+                    }
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                active_player_req: None,
+            })
+        ));
+        // Execute: Draw { count: 2 }
+        assert!(matches!(
+            def.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            })
+        ));
+        // Sub-ability: LoseLife { amount: 1 }
+        assert!(matches!(
+            def.execute
+                .as_deref()
+                .and_then(|a| a.sub_ability.as_deref())
+                .map(|a| &*a.effect),
+            Some(Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                ..
+            })
         ));
     }
 

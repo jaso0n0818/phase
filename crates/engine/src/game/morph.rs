@@ -155,10 +155,13 @@ pub fn play_face_down(
     // change_zone's face-down path).
     //
     // CR 616.1: a battlefield-entry pause IS reachable here — two co-played
-    // external enter-tapped `Moved` effects (Authority of the Consuls +
-    // Imposing Sovereign class) both write the entry event's tap field, a
-    // material same-field collision that surfaces an ordering prompt (see
-    // `paused_face_down_morph_entry_resumes_face_down`). The bail is correct
+    // external enter tap-state `Moved` effects writing in *opposite* directions
+    // (one enters tapped, one enters untapped — the Frozen Aether + Spelunking
+    // class) are last-applied-wins, a material CR 616.1e/f collision that
+    // surfaces an ordering prompt (see
+    // `paused_face_down_morph_entry_resumes_face_down`). (Two same-direction
+    // writes are idempotent and commute without a prompt — see replacement.rs
+    // `CommuteClass::EnterTapped`/`EnterUntapped`.) The bail is correct
     // and complete: the face-down profile rides the parked event, and the
     // resume path (`engine_replacement::handle_replacement_choice`'s ZoneChange
     // arm) applies it through the shared CR 708.3 helper
@@ -246,6 +249,17 @@ pub fn turn_face_up(
 
     crate::game::layers::mark_layers_full(state);
 
+    // CR 614.1e + CR 708.11: now that the permanent is face up
+    // (carrying its real abilities), apply any "As ~ is turned face up, [effect]"
+    // replacement effects as part of turning it up. The turn-up is not prevented
+    // — the applier returns the event unchanged and performs its actions (e.g.
+    // Hooded Hydra's +1/+1 counters) bound to this permanent.
+    let proposed = crate::types::proposed_event::ProposedEvent::TurnFaceUp {
+        object_id,
+        applied: std::collections::HashSet::new(),
+    };
+    let _ = crate::game::replacement::replace_event(state, proposed, events);
+
     events.push(GameEvent::TurnedFaceUp { object_id });
 
     Ok(())
@@ -284,9 +298,12 @@ pub fn manifest_card(
     // post-move override is dropped (the tail is the single authority).
     //
     // CR 616.1: a battlefield-entry pause IS reachable — two co-played external
-    // enter-tapped `Moved` effects (Authority of the Consuls + Imposing
-    // Sovereign class) collide on the entry's tap field and surface an ordering
-    // prompt. The bail is correct and complete: the face-down profile rides the
+    // enter tap-state `Moved` effects writing in *opposite* directions (one
+    // enters tapped, one enters untapped — the Frozen Aether + Spelunking class)
+    // are last-applied-wins, a material CR 616.1e/f collision that surfaces an
+    // ordering prompt (same-direction writes commute, no prompt — see
+    // replacement.rs `CommuteClass::EnterTapped`/`EnterUntapped`). The bail is
+    // correct and complete: the face-down profile rides the
     // parked event and the resume path applies it through the shared CR 708.3
     // helper (`zone_pipeline::apply_face_down_entry_profile`), so the manifest
     // resumes face down with nothing left for this helper to do.
@@ -452,11 +469,13 @@ mod tests {
     /// CR 616.1 + CR 708.3 discriminating test (fail-first): a face-down morph
     /// entry parked on a replacement-ordering prompt must resume FACE DOWN.
     ///
-    /// Reachability: two co-played external enter-tapped `Moved` defs (Authority
-    /// of the Consuls + Imposing Sovereign class — both parse as ChangeZone
-    /// Moved defs) both write the entry event's tap field; same-field writes are
-    /// non-commuting and the engine has no same-value dedupe, so the set is
-    /// material and CR 616.1 prompts — `move_object` parks the morph entry.
+    /// Reachability: two co-played external enter tap-state `Moved` defs writing
+    /// in *opposite* directions (one enters tapped, one enters untapped — the
+    /// Frozen Aether + Spelunking class, both parse as ChangeZone Moved defs)
+    /// are last-applied-wins, a material CR 616.1e/f collision that prompts —
+    /// `move_object` parks the morph entry. (Same-direction writes are
+    /// idempotent and commute without a prompt — see replacement.rs
+    /// `CommuteClass::EnterTapped`/`EnterUntapped`.)
     ///
     /// The resume path (`handle_replacement_choice`'s ZoneChange arm) previously
     /// destructured the approved event with `..`, DISCARDING
@@ -474,10 +493,23 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let player = PlayerId(0);
 
-        // Two external enter-tapped Moved replacements on the opponent's board.
-        for (offset, name) in [
-            (0u64, "Authority of the Consuls"),
-            (1, "Imposing Sovereign"),
+        // A genuinely *material* enter tap-state collision: one replacement makes
+        // the entrant enter tapped (Frozen Aether class), the other makes it
+        // enter untapped (Spelunking / Archelos class). Opposite directions are
+        // last-applied-wins, so CR 616.1e/f requires the controller to order them
+        // and the entry parks on a ReplacementChoice. (Two same-direction writes
+        // commute — see replacement.rs `CommuteClass::EnterTapped`/`EnterUntapped`.)
+        for (offset, name, state_change) in [
+            (
+                0u64,
+                "Frozen Aether",
+                crate::types::ability::TapStateChange::Tap,
+            ),
+            (
+                1,
+                "Spelunking",
+                crate::types::ability::TapStateChange::Untap,
+            ),
         ] {
             let oid = ObjectId(9000 + offset);
             let mut src = GameObject::new(
@@ -493,7 +525,7 @@ mod tests {
                     crate::types::ability::Effect::SetTapState {
                         target: TargetFilter::SelfRef,
                         scope: crate::types::ability::EffectScope::Single,
-                        state: crate::types::ability::TapStateChange::Tap,
+                        state: state_change,
                     },
                 ))
                 .destination_zone(Zone::Battlefield)
@@ -507,14 +539,14 @@ mod tests {
         let mut events = Vec::new();
         play_face_down(&mut state, player, id, &mut events).unwrap();
 
-        // CR 616.1: the colliding enter-tapped writes parked the entry — the
-        // card has NOT moved yet and the prompt is live.
+        // CR 616.1: the colliding tap/untap (opposite-direction) writes parked
+        // the entry — the card has NOT moved yet and the prompt is live.
         let WaitingFor::ReplacementChoice {
             player: chooser, ..
         } = state.waiting_for.clone()
         else {
             panic!(
-                "expected parked ReplacementChoice for the enter-tapped collision, got {:?}",
+                "expected parked ReplacementChoice for the tap/untap collision, got {:?}",
                 state.waiting_for
             );
         };
@@ -530,9 +562,13 @@ mod tests {
 
         let obj = &state.objects[&id];
         assert_eq!(obj.zone, Zone::Battlefield, "entry delivered after resume");
+        // CR 616.1e/f: opposite-direction tap-state writes are last-applied-wins.
+        // The chosen order (`index: 0`) lands the untapped write last, so the
+        // resumed entry is untapped — confirming both colliding replacements ran
+        // through the resume path and the chosen ordering was honored.
         assert!(
-            obj.tapped,
-            "both enter-tapped replacements applied to the resumed entry"
+            !obj.tapped,
+            "the chosen ordering's last-applied untap write must win on the resumed entry"
         );
         assert!(
             obj.face_down,
@@ -573,6 +609,131 @@ mod tests {
             })));
         assert_eq!(obj.abilities.len(), 1);
         assert_eq!(obj.color, vec![ManaColor::Green]);
+    }
+
+    #[test]
+    fn turn_face_up_applies_as_turned_face_up_replacement() {
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+
+        // CR 614.1e + CR 708.11: give the real face a Hooded-Hydra-style
+        // "As ~ is turned face up, put five +1/+1 counters on it." replacement.
+        {
+            let def = crate::parser::oracle_replacement::parse_replacement_line(
+                "As this creature is turned face up, put five +1/+1 counters on it.",
+                "Secret Creature",
+            )
+            .expect("turn-face-up replacement should parse");
+            assert_eq!(def.event, crate::types::ReplacementEvent::TurnFaceUp);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.replacement_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_replacement_definitions).push(def);
+        }
+
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+        turn_face_up(&mut state, player, id, &mut events).unwrap();
+
+        // The replacement applied AS the permanent was turned face up — it gains
+        // five +1/+1 counters (and there is no stack trigger / response window).
+        assert_eq!(
+            state.objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            5,
+            "the As-turned-face-up replacement must put five +1/+1 counters on it"
+        );
+    }
+
+    #[test]
+    fn turn_face_up_self_resolving_chain_applies_each_step_once() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilter};
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+
+        // A two-step self-resolving "As ~ is turned face up" replacement: put two
+        // +1/+1 counters on it, then put one more on it (both steps `SelfRef`).
+        // `resolve_ability_chain` follows the typed `sub_ability` chain itself, so
+        // each step must run EXACTLY once — total 3 counters, not 4 from a
+        // double-resolved second step.
+        {
+            let inner = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+            );
+            let mut outer = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::SelfRef,
+                },
+            );
+            outer.sub_ability = Some(Box::new(inner));
+            let def = crate::types::ability::ReplacementDefinition::new(
+                crate::types::ReplacementEvent::TurnFaceUp,
+            )
+            .valid_card(TargetFilter::SelfRef)
+            .execute(outer);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.replacement_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_replacement_definitions).push(def);
+        }
+
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+        turn_face_up(&mut state, player, id, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "each self-resolving step must apply exactly once (2 + 1), not double the sub-ability"
+        );
+    }
+
+    #[test]
+    fn turn_face_up_gaps_attach_to_external_target() {
+        // CR 708.11: Gift of Doom's "As ~ is turned face up, you may attach it to
+        // a creature" needs an external host *choice* made during the turn-up,
+        // which the replacement-apply path does not model. It is gapped honestly
+        // (no TurnFaceUp replacement is produced) rather than silently attaching
+        // the Aura to the wrong object — only the self-resolving counter class is
+        // modeled here.
+        let attach = crate::parser::oracle_replacement::parse_replacement_line(
+            "As this permanent is turned face up, you may attach it to a creature.",
+            "Secret Creature",
+        );
+        assert!(
+            !attach
+                .as_ref()
+                .is_some_and(|d| d.event == crate::types::ReplacementEvent::TurnFaceUp),
+            "attach-to-an-external-creature turn-face-up must not be modeled as a \
+             TurnFaceUp replacement (needs a turn-up-time choice)"
+        );
+
+        // The self-resolving counter class IS modeled.
+        let counters = crate::parser::oracle_replacement::parse_replacement_line(
+            "As this creature is turned face up, put five +1/+1 counters on it.",
+            "Secret Creature",
+        )
+        .expect("self-counter turn-face-up replacement should parse");
+        assert_eq!(counters.event, crate::types::ReplacementEvent::TurnFaceUp);
     }
 
     #[test]

@@ -3033,6 +3033,14 @@ pub enum ThisWayCause {
     Bounced,
 }
 
+/// CR 113.3b / CR 113.3c: Which stack ability kinds a `StackAbility` filter accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum StackAbilityKind {
+    Activated,
+    Triggered,
+}
+
 /// Typed target filter replacing all Forge filter strings and TargetSpec.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -3060,11 +3068,15 @@ pub enum TargetFilter {
     /// CR 113.7a: once activated or triggered, an ability exists on the stack
     /// independently of its source — `tag` matches by keyword-origin marker
     /// (e.g. `AbilityTag::Backup` for "becomes the target of a backup ability").
+    /// `kind` narrows to one ability class when the Oracle text does (Consign to
+    /// Memory's "triggered ability" leg); `None` accepts both.
     StackAbility {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<ControllerRef>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tag: Option<AbilityTag>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<StackAbilityKind>,
     },
     /// Matches spells on the stack (not activated/triggered abilities).
     /// CR 115.1a: Used by "becomes the target of a spell" triggers to filter source type.
@@ -3625,6 +3637,12 @@ pub enum QuantityRef {
     /// "with the same mana value as that spell". `CostPaidObject` subsumes the
     /// former `EventContextSourceManaValue` (CR 608.2k).
     ObjectManaValue { scope: ObjectScope },
+    /// CR 202.3 + CR 115.1: Mana value of the object chosen for a count-derived
+    /// target slot whose legal candidates are `filter` (e.g. "target artifact or
+    /// creature you control"). Distinct from `ObjectManaValue { scope: Target }`
+    /// (a possessive "that creature's mana value", filterless); this variant owns
+    /// its own target slot, surfaced via `quantity_ref_target_slot_spec`.
+    TargetObjectManaValue { filter: Box<TargetFilter> },
     /// CR 105.1 + CR 105.2: Number of colors of an object, scoped via
     /// ObjectScope. Counts the object's current W/U/B/R/G color set; colorless
     /// objects return 0. `Recipient` preserves "for each of its colors" on
@@ -3853,6 +3871,15 @@ pub enum QuantityRef {
     /// "you've drawn two or more cards this turn" and "an opponent has drawn
     /// four or more cards this turn" reuse the existing per-player aggregate axis.
     CardsDrawnThisTurn { player: PlayerScope },
+    /// CR 403.3 + CR 608.2h: Count of battlefield entries this turn by the scoped
+    /// player matching `filter`, using `battlefield_entries_this_turn` snapshots
+    /// (lands that entered and later left still count). Smuggler's Share class:
+    /// "for each opponent who had two or more lands enter the battlefield under
+    /// their control this turn."
+    BattlefieldEntriesThisTurn {
+        player: PlayerScope,
+        filter: TargetFilter,
+    },
     /// CR 305.2a + CR 603.4: Count of lands played by the scoped player this turn.
     /// `from_zones: None` uses `Player::lands_played_this_turn`; `Some` reads the
     /// per-player land-play origin history for conditions like "played a land
@@ -4055,6 +4082,11 @@ pub enum QuantityRef {
     /// as "copy it for each time you've cast your commander from the command
     /// zone this game."
     CommanderCastFromCommandZoneCount,
+    /// CR 903.3d: Mana value of a commander you own on the battlefield or in the command zone.
+    /// Used by Stinging Study's "X is the mana value of a commander you own on the battlefield
+    /// or in the command zone" pattern. The resolver selects the first matching commander
+    /// (any one if multiple exist) and returns its mana value.
+    CommanderManaValue { owner: ControllerRef },
     /// CR 106.1 + CR 109.1: Number of distinct colors among permanents matching
     /// a filter. "Gold", "multicolor", and "colorless" are not colors (CR 105.1),
     /// so each of W/U/B/R/G is counted at most once. Used by Faeburrow Elder's
@@ -7533,6 +7565,14 @@ pub enum Effect {
         /// sibling copy effect.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         copier: Option<ControllerRef>,
+        /// CR 707.9 + CR 707.2: Non-keyword copy exceptions stamped onto spell
+        /// copies at creation (Ob Nixilis: "except the copy isn't legendary").
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        additional_modifications: Vec<ContinuousModification>,
+        /// Ob Nixilis, the Adversary: "has starting loyalty X" where X is the
+        /// sacrificed creature's power when Casualty was paid.
+        #[serde(default)]
+        starting_loyalty_from_casualty_sacrifice: bool,
     },
     /// CR 702.50a + CR 707.10: Epic's recurring upkeep copy. Carries a snapshot
     /// of the Epic spell's resolved ability captured when the Epic spell
@@ -9785,6 +9825,9 @@ impl TargetFilter {
                 }
             }
             TargetFilter::Not { filter } => filter.collect_zones(out),
+            TargetFilter::ExiledBySource if !out.contains(&crate::types::zones::Zone::Exile) => {
+                out.push(crate::types::zones::Zone::Exile);
+            }
             _ => {}
         }
     }
@@ -11262,6 +11305,12 @@ pub struct ModalChoice {
     /// CR 702.172b: Chosen mode costs are additional costs, not part of the base mana cost.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mode_costs: Vec<ManaCost>,
+    /// CR 700.2i: Per-mode pawprint weight for points-budget modals ("up to N {P}
+    /// worth of modes"). Empty for all non-pawprint modals. When non-empty, the
+    /// modal is a pawprint budget modal and `max_choices` is reinterpreted as the
+    /// point budget (Σ of chosen `mode_pawprints` ≤ `max_choices`), NOT a mode count.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mode_pawprints: Vec<u8>,
     /// CR 702.42a: Entwine cost — when all modes are chosen, this additional cost is paid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entwine_cost: Option<ManaCost>,
@@ -12110,6 +12159,23 @@ impl AbilityDefinition {
         self.cost.as_ref().is_some_and(AbilityCost::consumes_source)
     }
 
+    /// Card-data migration: older exports stored one-shot semantics in
+    /// `is_consumed` at parse time, which made replacements inert at runtime.
+    pub fn normalize_parsed_replacement_flags(&mut self) {
+        if let Effect::AddTargetReplacement { replacement, .. } = &mut *self.effect {
+            replacement.fix_legacy_parse_time_consumed_flag();
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.normalize_parsed_replacement_flags();
+        }
+        if let Some(else_ab) = self.else_ability.as_mut() {
+            else_ab.normalize_parsed_replacement_flags();
+        }
+        for mode in &mut self.mode_abilities {
+            mode.normalize_parsed_replacement_flags();
+        }
+    }
+
     pub fn player_scope(mut self, scope: PlayerFilter) -> Self {
         self.player_scope = Some(scope);
         self
@@ -12278,6 +12344,17 @@ pub enum AbilityCondition {
     ///     kicker" clauses. Database synthesis resolves this to `variant`
     ///     once the card's kicker declarations are visible.
     AdditionalCostPaid {
+        /// CR 608.2c + CR 115.1 + CR 113.7: which object's casting-time payments this
+        /// condition reads. `Source` (default, CR 113.7) = the resolving ability's own
+        /// SpellContext (every legacy kicker/Gift/Buyback/Casualty/Replicate card).
+        /// `Target` (CR 115.1) = the first object target's stamped payments — "counter
+        /// target spell if it was kicked" (Ertai's Trickery): "it" anaphors to the
+        /// countered spell (CR 608.2c, whose own example is a counter-target-spell rider).
+        #[serde(
+            default = "AbilityCondition::default_subject_source",
+            skip_serializing_if = "AbilityCondition::is_subject_source"
+        )]
+        subject: ObjectScope,
         #[serde(default, skip_serializing_if = "AdditionalCostPaymentSource::is_any")]
         source: AdditionalCostPaymentSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -12623,6 +12700,19 @@ impl AbilityCondition {
         *value == 1
     }
 
+    /// CR 113.7: Default `subject` for `AdditionalCostPaid` is `Source` — the
+    /// resolving ability reads its own SpellContext payments.
+    pub(crate) fn default_subject_source() -> ObjectScope {
+        ObjectScope::Source
+    }
+
+    /// Skip-serialization predicate: omit `subject` from JSON when it equals the
+    /// default (`Source`). Keeps card-data.json compact for the common case.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub(crate) fn is_subject_source(value: &ObjectScope) -> bool {
+        matches!(value, ObjectScope::Source)
+    }
+
     /// Construct the default-shape `AdditionalCostPaid` condition: any single
     /// optional-additional-cost payment was made. Equivalent to the legacy
     /// nullary `AdditionalCostPaid` variant; preserves call sites in
@@ -12631,6 +12721,7 @@ impl AbilityCondition {
     /// `game/effects/change_zone.rs` (Collect Evidence).
     pub fn additional_cost_paid_any() -> Self {
         AbilityCondition::AdditionalCostPaid {
+            subject: ObjectScope::Source,
             source: AdditionalCostPaymentSource::Any,
             origin: None,
             origin_ordinal: None,
@@ -12644,6 +12735,7 @@ impl AbilityCondition {
     /// specific kicker variant being paid.
     pub fn additional_cost_paid_kicker(variant: KickerVariant) -> Self {
         AbilityCondition::AdditionalCostPaid {
+            subject: ObjectScope::Source,
             source: AdditionalCostPaymentSource::Kicker,
             origin: None,
             origin_ordinal: None,
@@ -12658,6 +12750,7 @@ impl AbilityCondition {
     /// `KickerVariant` using the card's `AdditionalCost::Kicker` declaration.
     pub fn additional_cost_paid_kicker_cost(cost: ManaCost) -> Self {
         AbilityCondition::AdditionalCostPaid {
+            subject: ObjectScope::Source,
             source: AdditionalCostPaymentSource::Kicker,
             origin: None,
             origin_ordinal: None,
@@ -12671,12 +12764,27 @@ impl AbilityCondition {
     /// payment count meeting a minimum.
     pub fn additional_cost_paid_n_times(min_count: u32) -> Self {
         AbilityCondition::AdditionalCostPaid {
+            subject: ObjectScope::Source,
             source: AdditionalCostPaymentSource::Kicker,
             origin: None,
             origin_ordinal: None,
             variant: None,
             kicker_cost: None,
             min_count,
+        }
+    }
+
+    /// CR 115.1 + CR 608.2c: "if it was kicked" where "it" = the resolving ability's
+    /// first object target (the countered spell), not the source.
+    pub fn additional_cost_paid_target() -> Self {
+        AbilityCondition::AdditionalCostPaid {
+            subject: ObjectScope::Target,
+            source: AdditionalCostPaymentSource::Any,
+            origin: None,
+            origin_ordinal: None,
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
         }
     }
 }
@@ -13255,6 +13363,12 @@ pub enum TriggerCondition {
     /// self-referential cases.
     PlacedByAbilitySource,
 
+    /// CR 608.2c + CR 603.2 + CR 603.4: "if it targets [filter]" intervening-if
+    /// on a spell-cast trigger — true when the triggering spell's committed targets
+    /// include at least one object matching `filter`. The trigger source is excluded
+    /// when the filter carries `FilterProp::Another` / "other" (Orvar, the All-Form).
+    TriggeringSpellTargetsFilter { filter: TargetFilter },
+
     // -- Combinators --
     /// All conditions must be true ("if you gained and lost life this turn")
     And { conditions: Vec<TriggerCondition> },
@@ -13476,6 +13590,14 @@ pub enum ReplacementCondition {
     /// "twice that many of each of those kinds of counters" doubling
     /// replacement) is the canonical case.
     ClassLevelGE { level: u8 },
+    /// CR 502.3 + CR 502.4: True only during the untap step. Permanents untap as
+    /// a turn-based action during the untap step (502.3) and no player receives
+    /// priority then (502.4), so the only `ProposedEvent::Untap` raised during
+    /// this phase is the turn-based untap. Gates an untap replacement ("if [X]
+    /// would untap during [its controller's / your] untap step, [effect]
+    /// instead" — Freyalise's Winds, Edge of Malacol) so it does NOT apply to
+    /// effect-untaps ("untap target creature") at other times.
+    DuringUntapStep,
     /// "unless you revealed a [type] card" / "unless you paid {mana}"
     /// CR 614.1d — Generic condition text that the engine does not yet decompose further.
     /// Using this variant lets the replacement be recognized for coverage while deferring
@@ -14292,6 +14414,11 @@ pub struct ReplacementDefinition {
     /// None = applies to the replacement source player only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_player: Option<ReplacementPlayerScope>,
+    /// Parser/runtime flag: mark `is_consumed` after this replacement successfully
+    /// applies once. Distinct from `is_consumed`, which is the live consumed state
+    /// checked by `find_applicable_replacements`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub consume_on_apply: bool,
     /// Marks this replacement as consumed (one-shot). Skipped by find_applicable_replacements.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_consumed: bool,
@@ -14384,6 +14511,13 @@ pub struct ReplacementDefinition {
 }
 
 impl ReplacementDefinition {
+    pub fn fix_legacy_parse_time_consumed_flag(&mut self) {
+        if self.is_consumed && self.shield_kind.is_none() {
+            self.consume_on_apply = true;
+            self.is_consumed = false;
+        }
+    }
+
     /// Create a new replacement definition with only the required event field.
     /// All optional fields default to `None`/`Mandatory`.
     pub fn new(event: ReplacementEvent) -> Self {
@@ -14405,6 +14539,7 @@ impl ReplacementDefinition {
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: None,
+            consume_on_apply: false,
             is_consumed: false,
             expiry: None,
             redirect_target: None,
@@ -14901,6 +15036,14 @@ pub enum ContinuousModification {
         /// applied (CR 707.9f-style "if the copy is or has certain
         /// characteristics").
         if_type: Option<CoreType>,
+    },
+    /// CR 707.9b + CR 306.5b/c: Override the starting loyalty declared by a
+    /// copy exception ("its starting loyalty is N"). Like `AddCounterOnEnter`,
+    /// this is consumed at copy resolution: token-copy uses the value before
+    /// seeding intrinsic loyalty counters, and BecomeCopy folds it into the
+    /// copied values before installing the layer-1 copy effect.
+    SetStartingLoyalty {
+        value: u32,
     },
     /// CR 707.9 + CR 202.1b: Strip a copy's mana cost — the "has no mana cost"
     /// copy exception used by Embalm (CR 702.128a) and Eternalize
@@ -16185,7 +16328,8 @@ mod tests {
             filter,
             TargetFilter::StackAbility {
                 controller: None,
-                tag: None
+                tag: None,
+                kind: None,
             }
         );
         assert_eq!(
@@ -16202,7 +16346,8 @@ mod tests {
             filter,
             TargetFilter::StackAbility {
                 controller: Some(ControllerRef::You),
-                tag: None
+                tag: None,
+                kind: None,
             }
         );
         assert_eq!(
@@ -16564,6 +16709,7 @@ mod tests {
             ContinuousModification::AddColor {
                 color: ManaColor::Red,
             },
+            ContinuousModification::SetStartingLoyalty { value: 1 },
         ];
         let json = serde_json::to_string(&mods).unwrap();
         let deserialized: Vec<ContinuousModification> = serde_json::from_str(&json).unwrap();

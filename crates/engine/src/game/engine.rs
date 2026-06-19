@@ -993,6 +993,8 @@ mod auto_pass_decision_tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             Vec::new(),
             copy_id,
@@ -1208,7 +1210,10 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                 player,
                 valid_blocker_ids,
                 ..
-            } if !phase_stop_hit(state, *player) && valid_blocker_ids.is_empty() => {
+            } if !phase_stop_hit(state, *player)
+                && (valid_blocker_ids.is_empty()
+                    || !super::combat::has_attackers_in_play(state)) =>
+            {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_blockers(state, *player, &mut events) {
                     Ok(wf) => {
@@ -1260,6 +1265,13 @@ fn finalize_copy_retarget(
     effect_source_id: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    let paradigm_remaining_offers = match &state.waiting_for {
+        WaitingFor::CopyRetarget {
+            paradigm_remaining_offers,
+            ..
+        } => paradigm_remaining_offers.clone(),
+        _ => None,
+    };
     let targets: Vec<_> = slots
         .iter()
         .map(|slot| {
@@ -1286,12 +1298,19 @@ fn finalize_copy_retarget(
     if let Some(wf) =
         triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
     {
+        if let Some(remaining) = paradigm_remaining_offers.filter(|offers| !offers.is_empty()) {
+            effects::paradigm::stash_pending_remaining_offers(state, player, remaining);
+        }
         state.waiting_for = wf;
         state.priority_player = player;
         effects::drain_pending_continuation(state, events);
         return Ok(());
     }
-    state.waiting_for = WaitingFor::Priority { player };
+    state.waiting_for = if let Some(remaining) = paradigm_remaining_offers {
+        effects::paradigm::waiting_after_remaining_offers(player, remaining)
+    } else {
+        WaitingFor::Priority { player }
+    };
     state.priority_player = player;
     effects::drain_pending_continuation(state, events);
     Ok(())
@@ -1745,17 +1764,23 @@ fn apply_action(
             if let Some(obj) = state.objects.get_mut(object_id) {
                 if back_face {
                     // Swap to back face using existing primitives
-                    let back = obj.back_face.take().expect("MDFC has back face");
+                    let back = obj.back_face.take().expect("dual-faced card has back face");
                     let front_snapshot = super::printed_cards::snapshot_object_face(obj);
                     super::printed_cards::apply_back_face_to_object(obj, back);
                     obj.back_face = Some(front_snapshot);
-                    // CR 712.8a: Mark MDFC back-face so apply_zone_exit_cleanup
-                    // reverts to front face on any zone exit to a non-battlefield zone.
-                    // Do NOT set obj.transformed — MDFC face choice ≠ transform
+                    // CR 712.8a (MDFC) / CR 709.3 (split): non-front face showing;
+                    // `apply_zone_exit_cleanup` reverts when leaving the stack.
                     obj.modal_back_face = true;
                 } else {
-                    // Front face chosen — clear layout_kind so the MDFC intercept
+                    // Front face chosen — clear layout_kind so the intercept
                     // won't re-fire on re-entry into handle_play_land / handle_cast_spell.
+                    if let Some(ref mut bf) = obj.back_face {
+                        bf.layout_kind = None;
+                    }
+                }
+                // After choosing either face, clear layout on the stashed other
+                // half so cast/play re-entry does not re-prompt.
+                if back_face {
                     if let Some(ref mut bf) = obj.back_face {
                         bf.layout_kind = None;
                     }
@@ -3352,6 +3377,11 @@ fn apply_action(
                 ));
             }
             zones::move_to_zone(state, object_id, Zone::Exile, &mut events);
+            // CR 702.66a + CR 607.2a: Delved cards are exiled "with" the spell
+            // being cast (Murktide Regent ETB counters — issue #1322).
+            if let Some(spell_id) = state.pending_cast.as_ref().map(|p| p.object_id) {
+                crate::game::exile_links::push_tracked_by_source(state, object_id, spell_id);
+            }
             if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
                 p.mana_pool.add(crate::types::mana::ManaUnit::convoke_payment(
                     crate::types::mana::ManaType::Colorless,
@@ -3892,7 +3922,15 @@ fn apply_action(
                 &mut events,
             )
             .map_err(EngineError::InvalidAction)?;
-            WaitingFor::Priority { player: p }
+            // CR 707.9 + CR 614.12a: battlefield entry may park on
+            // `CopyTargetChoice` (enter-as-copy) or `ReplacementChoice` (optional
+            // copy / CR 616.1 ordering); preserve the surfaced prompt instead of
+            // clobbering it with Priority.
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                WaitingFor::Priority { player: p }
+            } else {
+                state.waiting_for.clone()
+            }
         }
         // CR 702.190a: Sneak — cast a spell from hand during declare blockers
         // by paying the Sneak cost and returning an unblocked attacker.
@@ -4319,15 +4357,25 @@ fn apply_action(
             let p = *player;
             let copy_id = effects::paradigm::cast_paradigm_copy(state, src, p, &mut events)
                 .map_err(EngineError::InvalidAction)?;
+            let remaining: Vec<ObjectId> = offers
+                .iter()
+                .copied()
+                .filter(|id| *id != src)
+                .collect();
             // CR 707.10c: If the paradigm spell has target slots, open target
-            // selection via CopyRetarget. Otherwise return to priority so the
-            // copy resolves through normal stack flow.
-            if effects::prepare::open_copy_target_selection(state, copy_id, p)
-                .map_err(EngineError::InvalidAction)?
+            // selection via CopyRetarget. Otherwise re-offer any remaining
+            // paradigm sources before returning to priority.
+            if effects::prepare::open_copy_target_selection(
+                state,
+                copy_id,
+                p,
+                Some(remaining.clone()),
+            )
+            .map_err(EngineError::InvalidAction)?
             {
                 state.waiting_for.clone()
             } else {
-                WaitingFor::Priority { player: p }
+                effects::paradigm::waiting_after_remaining_offers(p, remaining)
             }
         }
         // CR 702.xxx: Paradigm (Strixhaven) — decline the turn-based offer.
@@ -4531,6 +4579,7 @@ fn apply_action(
                 effect_kind,
                 effect_source_id,
                 current_slot,
+                paradigm_remaining_offers,
             },
             GameAction::ChooseTarget { target },
         ) => {
@@ -4567,6 +4616,7 @@ fn apply_action(
                     effect_kind: *effect_kind,
                     effect_source_id: *effect_source_id,
                     current_slot: next_slot,
+                    paradigm_remaining_offers: paradigm_remaining_offers.clone(),
                 };
             } else {
                 finalize_copy_retarget(
@@ -17939,6 +17989,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            library_position: None,
             is_cost_payment: false,
         };
         state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
@@ -18009,6 +18060,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            library_position: None,
             is_cost_payment: false,
         };
 
@@ -18055,6 +18107,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            library_position: None,
             is_cost_payment: false,
         };
 
@@ -21594,6 +21647,163 @@ mod crew_tests {
             other => panic!("Expected CrewVehicle, got {:?}", other),
         }
     }
+
+    /// Build a Vehicle (Artifact + "Vehicle" subtype) with a printed
+    /// `Crew { power }` in BOTH `base_keywords` and `keywords`, so the printed
+    /// keyword survives the `obj.keywords = obj.base_keywords.clone()` reset
+    /// at the top of every `evaluate_layers` pass.
+    fn make_printed_crew_vehicle(
+        state: &mut GameState,
+        card: CardId,
+        controller: PlayerId,
+        crew_power: u32,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            card,
+            controller,
+            "Printed Vehicle".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Vehicle".to_string());
+        let crew = crate::types::keywords::Keyword::Crew {
+            power: crew_power,
+            once_per_turn: None,
+        };
+        obj.base_keywords.push(crew.clone());
+        obj.keywords.push(crew);
+        obj.base_power = Some(6);
+        obj.base_toughness = Some(5);
+        obj.power = Some(6);
+        obj.toughness = Some(5);
+        id
+    }
+
+    /// Attach a "Vehicles you control have crew N" continuous static (the
+    /// Kotori, Pilot Prodigy class) to `source`, scoped to Vehicles controlled
+    /// by `source`'s controller.
+    fn attach_crew_grant_static(state: &mut GameState, source: ObjectId, granted_power: u32) {
+        use crate::types::ability::{
+            ContinuousModification, ControllerRef, TargetFilter, TypedFilter,
+        };
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::You)
+                    .subtype("Vehicle".to_string()),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Crew {
+                    power: granted_power,
+                    once_per_turn: None,
+                },
+            }]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+    }
+
+    fn crew_powers(state: &GameState, vehicle: ObjectId) -> Vec<u32> {
+        state.objects[&vehicle]
+            .keywords
+            .iter()
+            .filter_map(|kw| match kw {
+                crate::types::keywords::Keyword::Crew { power, .. } => Some(*power),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Issue #2342 — Kotori, Pilot Prodigy: "Vehicles you control have crew 2."
+    /// A granted single-authoritative-value Crew must REPLACE the printed Crew
+    /// rather than coexist with it, so `handle_crew_activation`'s `find_map`
+    /// reads the granted value. Before the CR 613.7 override branch in
+    /// `apply_keyword_modification`, the printed `Crew { power: 3 }` and granted
+    /// `Crew { power: 2 }` would both survive (PartialEq sees them as distinct),
+    /// leaving two Crew entries and letting the stale printed `3` win the read.
+    #[test]
+    fn granted_crew_value_overrides_printed_value() {
+        let mut state = setup_game_at_main_phase();
+        let vehicle = make_printed_crew_vehicle(&mut state, CardId(300), PlayerId(0), 3);
+        let kotori = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(0),
+            "Kotori".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&kotori).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        attach_crew_grant_static(&mut state, kotori, 2);
+
+        crate::game::layers::evaluate_layers(&mut state);
+
+        // Exactly one Crew entry, carrying the granted value (2), not the
+        // printed value (3) — the printed duplicate was removed, not appended.
+        assert_eq!(
+            crew_powers(&state, vehicle),
+            vec![2],
+            "granted crew 2 must replace printed crew 3, leaving a single Crew entry"
+        );
+    }
+
+    /// Negative control: with no granting static in play, the printed Crew
+    /// value is left untouched by the override branch. Proves the fix does not
+    /// regress the default (single printed keyword) case.
+    #[test]
+    fn printed_crew_value_unchanged_without_granting_static() {
+        let mut state = setup_game_at_main_phase();
+        let vehicle = make_printed_crew_vehicle(&mut state, CardId(310), PlayerId(0), 3);
+
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            crew_powers(&state, vehicle),
+            vec![3],
+            "without a granting static the printed crew 3 must be preserved"
+        );
+    }
+
+    /// Filter-scope exclusion: the "Vehicles you control" static grant must
+    /// compose with the existing `TargetFilter`/`ControllerRef` scoping — an
+    /// opponent-controlled Vehicle is outside the `controller=You` scope and
+    /// must keep its printed crew value, proving the override branch does not
+    /// blindly rewrite every Crew entry engine-wide.
+    #[test]
+    fn granted_crew_does_not_override_opponents_vehicle() {
+        let mut state = setup_game_at_main_phase();
+        // Opponent's Vehicle with printed Crew 4.
+        let opp_vehicle = make_printed_crew_vehicle(&mut state, CardId(320), PlayerId(1), 4);
+        // Granting static controlled by PlayerId(0) — "you control" excludes
+        // the opponent's Vehicle.
+        let kotori = create_object(
+            &mut state,
+            CardId(321),
+            PlayerId(0),
+            "Kotori".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&kotori).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        attach_crew_grant_static(&mut state, kotori, 2);
+
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            crew_powers(&state, opp_vehicle),
+            vec![4],
+            "opponent's Vehicle is outside the 'you control' scope and must keep printed crew 4"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -22810,6 +23020,131 @@ mod keyword_action_stack_tests {
                 .attached_to
                 .is_none(),
             "Equipment must not attach when Equip is countered"
+        );
+    }
+
+    /// Issue #3660: deferred copy observers must not drop remaining paradigm offers.
+    #[test]
+    fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
+        use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
+        use crate::types::ability::{
+            Effect, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+        };
+        use crate::types::game_state::{
+            CastingVariant, CopyTargetSlot, StackEntry, StackEntryKind,
+        };
+        use crate::types::zones::Zone;
+
+        fn deferred_draw_trigger(
+            state: &mut GameState,
+            name: &str,
+            controller: PlayerId,
+        ) -> PendingTriggerContext {
+            let source_id = create_object(
+                state,
+                CardId(state.next_object_id),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            PendingTriggerContext {
+                pending: PendingTrigger {
+                    source_id,
+                    controller,
+                    condition: None,
+                    ability: {
+                        let mut ability = ResolvedAbility::new(
+                            Effect::Draw {
+                                count: QuantityExpr::Fixed { value: 1 },
+                                target: TargetFilter::Controller,
+                            },
+                            vec![],
+                            source_id,
+                            controller,
+                        );
+                        ability.description = Some(name.to_string());
+                        ability
+                    },
+                    timestamp: 0,
+                    target_constraints: Vec::new(),
+                    distribute: None,
+                    trigger_event: None,
+                    modal: None,
+                    mode_abilities: vec![],
+                    description: Some(name.to_string()),
+                    may_trigger_origin: None,
+                    subject_match_count: None,
+                    die_result: None,
+                },
+                trigger_events: Vec::new(),
+            }
+        }
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let copy_id = ObjectId(50);
+        let remaining = vec![ObjectId(101)];
+
+        state.stack.push_back(StackEntry {
+            id: copy_id,
+            source_id: copy_id,
+            controller: player,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 2 },
+                        target: TargetFilter::Player,
+                    },
+                    vec![TargetRef::Player(PlayerId(1))],
+                    copy_id,
+                    player,
+                )),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        let slots = vec![CopyTargetSlot {
+            current: Some(TargetRef::Player(PlayerId(1))),
+            legal_alternatives: vec![TargetRef::Player(PlayerId(1))],
+        }];
+        state.waiting_for = WaitingFor::CopyRetarget {
+            player,
+            copy_id,
+            target_slots: slots.clone(),
+            effect_kind: EffectKind::Draw,
+            effect_source_id: Some(copy_id),
+            current_slot: 0,
+            paradigm_remaining_offers: Some(remaining.clone()),
+        };
+        state.deferred_triggers = vec![
+            deferred_draw_trigger(&mut state, "Copy Observer A", player),
+            deferred_draw_trigger(&mut state, "Copy Observer B", player),
+        ];
+
+        let mut events = Vec::new();
+        finalize_copy_retarget(
+            &mut state,
+            player,
+            copy_id,
+            &slots,
+            EffectKind::Draw,
+            Some(copy_id),
+            &mut events,
+        )
+        .expect("finalize copy retarget");
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }),
+            "expected OrderTriggers pause, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state
+                .pending_paradigm_remaining_offers
+                .as_ref()
+                .map(|pending| pending.offers.as_slice()),
+            Some(remaining.as_slice()),
         );
     }
 }

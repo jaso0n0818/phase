@@ -19,7 +19,7 @@ use crate::types::zones::Zone;
 
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, parse_static_line_multi};
-use super::super::oracle_target::parse_target;
+use super::super::oracle_target::{parse_target, parse_target_with_ctx};
 use super::super::oracle_util::{
     normalize_card_name_refs, parse_count_expr, strip_reminder_text, TextPair,
 };
@@ -74,7 +74,7 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         let (mut target, _) = if parse_cost_paid_object_copy_target(&target_lower) {
             (TargetFilter::CostPaidObject, "")
         } else {
-            parse_target(target_text)
+            parse_target_with_ctx(target_text, ctx)
         };
         if has_another {
             if let TargetFilter::Typed(ref mut typed) = target {
@@ -1131,7 +1131,7 @@ fn strip_token_keyword_clause_suffixes(text: &str) -> &str {
     if let Ok((_, head)) = take_until::<_, _, nom::error::Error<&str>>("\"").parse(clause) {
         clause = head;
     }
-    for marker in [" where ", " equal to ", " attached "] {
+    for marker in [" where ", " equal to ", " attached ", " named "] {
         clause = truncate_token_keyword_clause_before(clause, marker);
     }
     clause
@@ -1423,6 +1423,37 @@ mod tests {
         );
     }
 
+    /// Issue #823 — Jace, Mirror Mage: the copy token exception includes both
+    /// "not legendary" and a starting-loyalty override. Both are non-keyword
+    /// copy exceptions and must reach `CopyTokenOf.additional_modifications`.
+    #[test]
+    fn jace_copy_token_routes_starting_loyalty_override() {
+        let effect = try_parse_token(
+            "create a token that's a copy of ~, except it's not legendary and its starting loyalty is 1",
+            "create a token that's a copy of ~, except it's not legendary and its starting loyalty is 1",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            target,
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert_eq!(target, TargetFilter::SelfRef);
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary
+            }
+        )));
+        assert!(additional_modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetStartingLoyalty { value: 1 })));
+    }
+
     /// Issue #1696 — Myrkul, Lord of Bones: "create a token that's a copy of
     /// that card, except it's an enchantment and loses all other card types."
     /// CR 205.1a + CR 707.9d: the "loses all other card types" suffix is the
@@ -1668,6 +1699,44 @@ mod tests {
         let kws = parse_token_keyword_clause(
             "with flying equal to the number of card types among cards in your graveyard",
         );
+        assert_eq!(kws, vec![Keyword::Flying]);
+    }
+
+    /// "with <keyword> named <X>" (Crow Storm, The Hive, etc.): the trailing
+    /// "named …" token-name clause must be truncated before keyword parsing so
+    /// the keyword survives. Without the " named " marker this yields [].
+    #[test]
+    fn keyword_clause_with_named_suffix() {
+        let kws = parse_token_keyword_clause("with flying named storm crow");
+        assert_eq!(kws, vec![Keyword::Flying]);
+    }
+
+    /// Hornet Cannon: "with flying and haste named hornet" must keep BOTH.
+    #[test]
+    fn keyword_clause_multiple_with_named_suffix() {
+        let kws = parse_token_keyword_clause("with flying and haste named hornet");
+        assert!(kws.contains(&Keyword::Flying), "got {kws:?}");
+        assert!(kws.contains(&Keyword::Haste), "got {kws:?}");
+    }
+
+    /// Jungle Patrol / Wall of Kelp: "with defender named wall".
+    #[test]
+    fn keyword_clause_defender_with_named_suffix() {
+        let kws = parse_token_keyword_clause("with defender named wall");
+        assert_eq!(kws, vec![Keyword::Defender]);
+    }
+
+    /// Then Dreadmaws Ate Everyone: "with trample named dreadmaw".
+    #[test]
+    fn keyword_clause_trample_with_named_suffix() {
+        let kws = parse_token_keyword_clause("with trample named dreadmaw");
+        assert_eq!(kws, vec![Keyword::Trample]);
+    }
+
+    /// No-regression: the " attached " marker must still truncate.
+    #[test]
+    fn keyword_clause_with_attached_suffix() {
+        let kws = parse_token_keyword_clause("with flying attached to it");
         assert_eq!(kws, vec![Keyword::Flying]);
     }
 
