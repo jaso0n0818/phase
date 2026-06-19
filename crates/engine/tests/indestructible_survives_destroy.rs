@@ -1,5 +1,5 @@
 //! Indestructible keyword — "destroy" effects and lethal damage cannot remove
-//! a creature with indestructible (CR 702.12b / CR 702.12c).
+//! a creature with indestructible (CR 702.12b).
 //!
 //! Three complementary regressions in a single file:
 //!
@@ -17,10 +17,7 @@
 //! CR 702.12b: "A permanent with indestructible can't be destroyed. Such
 //!   permanents are not destroyed by lethal damage, and the 'destroy' keyword
 //!   doesn't affect them."
-//! CR 702.12c: "A permanent with indestructible that has been dealt lethal
-//!   damage isn't destroyed by state-based actions, though the damage remains
-//!   marked on it."
-//! CR 701.7a: "To destroy a permanent, move it from the battlefield to its
+//! CR 701.8a: "To destroy a permanent, move it from the battlefield to its
 //!   owner's graveyard."
 
 use engine::game::scenario::{GameScenario, P0};
@@ -107,7 +104,7 @@ fn wrath_destroys_normal_creatures_but_not_indestructible() {
     );
 }
 
-/// CR 702.12c: a creature with indestructible that receives lethal damage from
+/// CR 702.12b + CR 704.5g: a creature with indestructible that receives lethal damage from
 /// a spell remains on the battlefield — state-based actions that check for
 /// lethal damage (CR 704.5g) skip indestructible permanents.
 ///
@@ -145,6 +142,6 @@ fn lethal_spell_damage_does_not_destroy_indestructible_creature() {
         runner.state().objects[&target].zone,
         Zone::Battlefield,
         "an indestructible 1/1 that receives 5 lethal damage from a spell must remain \
-         on the battlefield — state-based actions skip indestructible creatures (CR 702.12c)"
+         on the battlefield — state-based actions skip indestructible creatures (CR 702.12b)"
     );
 }
