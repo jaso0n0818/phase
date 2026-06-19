@@ -317,6 +317,7 @@ mod lost_monarch_combat_damage_by_type_intervening_if;
 mod louisoix_sacrifice_counter;
 mod lurking_predators_1604_repro;
 mod madame_null_integration;
+mod madrush_cyclops_haste_grant;
 mod magnetic_mountain_choose_and_pay;
 mod magus_of_the_abyss_scoped_chooser;
 mod mana_cost_reducers_issue_141;
