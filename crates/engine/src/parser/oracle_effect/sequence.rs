@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
-use nom::character::complete::{multispace0, multispace1};
+use nom::character::complete::multispace1;
 use nom::combinator::{all_consuming, eof, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -2108,8 +2108,24 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
     .is_ok()
 }
 
-/// CR 707.10c: nom recognizer for the "[you] may choose [a] new target[s] for
+/// CR 707.10c: nom parser for the "[you] may choose [a] new target[s] for
 /// {the,that} copy/copies" continuation clause that grants copy retargeting.
+pub(super) fn parse_copy_retarget_clause(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            opt(alt((tag(", and "), tag("and ")))),
+            opt(tag("you ")),
+            tag("may choose "),
+            alt((tag("a new target "), tag("new targets "))),
+            tag("for "),
+            alt((tag("the copies"), tag("the copy"), tag("that copy"))),
+            opt(alt((tag("."), tag(",")))),
+        ),
+    )
+    .parse(input)
+}
+
 /// Operates on lowercased text; tolerates a trailing period/whitespace.
 ///
 /// The clause is composed from independent axes rather than enumerated as full
@@ -2121,23 +2137,9 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
 ///   - determiner ("the copy/copies" — Fork/Twincast; "that copy" — the Chain
 ///     cycle's "a new target for that copy").
 pub(super) fn recognize_copy_retarget_clause(lower: &str) -> bool {
-    value(
-        (),
-        (
-            multispace0,
-            opt(alt((tag::<_, _, OracleError<'_>>(", and "), tag("and ")))),
-            opt(tag("you ")),
-            tag("may choose "),
-            alt((tag("a new target "), tag("new targets "))),
-            tag("for "),
-            alt((tag("the copies"), tag("the copy"), tag("that copy"))),
-            opt(alt((tag("."), tag(",")))),
-            multispace0,
-            eof,
-        ),
-    )
-    .parse(lower.trim())
-    .is_ok()
+    all_consuming(parse_copy_retarget_clause)
+        .parse(lower.trim())
+        .is_ok()
 }
 
 /// CR 707.10c: Set `retarget` on the (possibly delayed-trigger-wrapped)
