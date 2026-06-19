@@ -94,6 +94,7 @@ mod good_king_mog_xii_chapter_iv_588;
 mod gran_gran_integration;
 mod greater_good_activation;
 mod green_suns_zenith_regression;
+mod griffin_rider_conditional_self_buff;
 mod halana_alena_partners_where_x;
 mod harrow_regression;
 mod hellkite_tyrant_steal_artifacts_2906;
