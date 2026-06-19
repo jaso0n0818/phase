@@ -2419,6 +2419,10 @@ fn max_blockers_each_combat(state: &GameState) -> Option<u32> {
 /// Per CR 509.1h, a creature remains blocked for the rest of combat even if all
 /// blockers are removed. This function checks the `blocked` flag set at blocker
 /// declaration, not the current blocker list.
+///
+/// CR 506.4 + CR 702.49a + CR 702.190a: Attackers that left the battlefield
+/// (destroyed, exiled, bounced, etc.) are excluded — Ninjutsu/Sneak may only
+/// return unblocked attackers still on the battlefield.
 pub fn unblocked_attackers(state: &GameState) -> Vec<ObjectId> {
     let Some(combat) = &state.combat else {
         return Vec::new();
@@ -2427,6 +2431,7 @@ pub fn unblocked_attackers(state: &GameState) -> Vec<ObjectId> {
         .attackers
         .iter()
         .filter(|a| !a.blocked)
+        .filter(|a| is_attacker_in_play(state, a.object_id))
         .map(|a| a.object_id)
         .collect()
 }
@@ -2849,6 +2854,7 @@ pub fn get_valid_block_targets(state: &GameState) -> HashMap<ObjectId, Vec<Objec
             .attackers
             .iter()
             .filter(|a| a.defending_player == blocker_controller)
+            .filter(|a| is_attacker_in_play(state, a.object_id))
             .filter(|a| can_block_pair(state, blocker_id, a.object_id))
             .map(|a| a.object_id)
             .collect();
@@ -3127,6 +3133,42 @@ pub fn get_valid_attack_targets(state: &GameState) -> Vec<AttackTarget> {
     }
 
     targets
+}
+
+/// CR 506.4: A creature stops being an attacker when it leaves the battlefield
+/// or phases out. Attackers that left during the declare-attackers step may
+/// remain listed until pruned.
+pub fn is_attacker_in_play(state: &GameState, attacker_id: ObjectId) -> bool {
+    state.objects.get(&attacker_id).is_some_and(|obj| {
+        obj.zone == Zone::Battlefield
+            && !obj.is_phased_out()
+            && obj.card_types.core_types.contains(&CoreType::Creature)
+    })
+}
+
+/// CR 508.8: True when at least one declared attacker is still on the battlefield.
+pub fn has_attackers_in_play(state: &GameState) -> bool {
+    state.combat.as_ref().is_some_and(|combat| {
+        combat
+            .attackers
+            .iter()
+            .any(|attacker| is_attacker_in_play(state, attacker.object_id))
+    })
+}
+
+/// CR 506.4: Drop attackers that are no longer on the battlefield.
+pub fn prune_attackers_not_in_play(state: &mut GameState) {
+    if let Some(combat) = state.combat.as_ref() {
+        let stale: Vec<ObjectId> = combat
+            .attackers
+            .iter()
+            .filter(|attacker| !is_attacker_in_play(state, attacker.object_id))
+            .map(|attacker| attacker.object_id)
+            .collect();
+        for attacker_id in stale {
+            super::effects::remove_from_combat::remove_object_from_combat(state, attacker_id);
+        }
+    }
 }
 
 /// Check if the active player controls any creatures that could legally attack.
@@ -3414,6 +3456,66 @@ mod tests {
             .keywords
             .push(Keyword::Defender);
         assert!(validate_attackers(&state, &[id]).is_err());
+    }
+
+    #[test]
+    fn walking_bulwark_grants_defender_creature_attack_permission() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        // CR 702.3b + CR 611.2c: The resolved ability grants a targeted
+        // defender an until-end-of-turn rule exception that lets it attack.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bulwark = scenario
+            .add_creature_from_oracle(
+                PlayerId(0),
+                "Walking Bulwark",
+                0,
+                3,
+                "Defender\n{2}: Until end of turn, target creature with defender gains haste, can attack as though it didn't have defender, and assigns combat damage equal to its toughness rather than its power. Activate only as a sorcery.",
+            )
+            .id();
+        let wall = scenario
+            .add_creature(PlayerId(0), "Target Wall", 0, 4)
+            .defender()
+            .with_summoning_sickness()
+            .id();
+        scenario.with_mana_pool(
+            PlayerId(0),
+            vec![
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, Vec::new()),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, Vec::new()),
+            ],
+        );
+
+        let mut runner = scenario.build();
+        runner.activate(bulwark, 0).target_object(wall).resolve();
+
+        assert!(
+            runner
+                .state()
+                .objects
+                .get(&wall)
+                .unwrap()
+                .has_keyword(&Keyword::Haste),
+            "Walking Bulwark must grant haste to the targeted defender"
+        );
+        assert!(
+            validate_attackers(runner.state(), &[wall]).is_ok(),
+            "Walking Bulwark's transient CanAttackWithDefender grant must let the targeted defender attack"
+        );
+
+        runner.advance_to_combat();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ));
+        runner
+            .declare_attackers(&[(wall, AttackTarget::Player(PlayerId(1)))])
+            .expect("targeted defender should be legal to declare as an attacker");
     }
 
     /// CR 702.3b + CR 122.1: Demon Wall — "as long as this creature has a
@@ -4370,6 +4472,43 @@ mod tests {
     }
 
     #[test]
+    fn has_attackers_in_play_false_when_attacker_left_battlefield() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        assert!(has_attackers_in_play(&state));
+
+        state.objects.get_mut(&attacker).unwrap().zone = Zone::Graveyard;
+        assert!(
+            !has_attackers_in_play(&state),
+            "attackers in the graveyard must not count as in play (#1555)"
+        );
+
+        prune_attackers_not_in_play(&mut state);
+        assert!(state.combat.as_ref().unwrap().attackers.is_empty());
+    }
+
+    #[test]
+    fn unblocked_attackers_excludes_attackers_not_in_play() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        assert_eq!(unblocked_attackers(&state), vec![attacker]);
+
+        state.objects.get_mut(&attacker).unwrap().zone = Zone::Graveyard;
+        assert!(
+            unblocked_attackers(&state).is_empty(),
+            "dead attackers must not be returnable for Ninjutsu/Sneak (#1319)"
+        );
+    }
+
+    #[test]
     fn has_potential_attackers_false_for_summoning_sick() {
         let mut state = setup();
         let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
@@ -4535,6 +4674,64 @@ mod tests {
         let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
 
         assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    #[test]
+    fn kappa_cannoneer_artifact_enter_trigger_makes_it_unblockable() {
+        use crate::game::scenario::GameScenario;
+        use crate::game::triggers::process_triggers;
+        use crate::game::zones::move_to_zone;
+        use crate::types::actions::GameAction;
+        use crate::types::counter::CounterType;
+        use crate::types::zones::Zone;
+
+        let mut scenario = GameScenario::new();
+        let cannoneer = scenario
+            .add_creature_from_oracle(
+                PlayerId(0),
+                "Kappa Cannoneer",
+                4,
+                4,
+                "Improvise\nWard {4}\nWhenever this creature or another artifact you control enters, put a +1/+1 counter on this creature. It can't be blocked this turn.",
+            )
+            .as_artifact()
+            .id();
+        let artifact = scenario
+            .add_creature_to_hand(PlayerId(0), "Servo", 1, 1)
+            .as_artifact()
+            .id();
+        let blocker = scenario.add_creature(PlayerId(1), "Blocker", 2, 2).id();
+
+        let mut runner = scenario.build();
+        let mut events = Vec::new();
+        move_to_zone(runner.state_mut(), artifact, Zone::Battlefield, &mut events);
+        process_triggers(runner.state_mut(), &events);
+        assert!(
+            runner.state().stack.len() == 1,
+            "artifact ETB should put Kappa Cannoneer's trigger on the stack"
+        );
+        runner
+            .act(GameAction::PassPriority)
+            .expect("active player should pass priority");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("nonactive player should pass priority");
+
+        assert_eq!(
+            runner
+                .state()
+                .objects
+                .get(&cannoneer)
+                .unwrap()
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&1),
+            "Kappa Cannoneer's trigger should put the counter on itself"
+        );
+        assert!(
+            validate_blockers(runner.state(), &[(blocker, cannoneer)]).is_err(),
+            "Kappa Cannoneer's resolved trigger should make it unblockable this turn"
+        );
     }
 
     /// CR 509.1b + CR 301.5a: An Equipment-owned `CantBeBlocked` static must

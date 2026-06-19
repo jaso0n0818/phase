@@ -1928,6 +1928,7 @@ mod tests {
                     effect_kind: EffectKind::CopySpell,
                     effect_source_id: Some(ObjectId(1)),
                     current_slot: 0,
+                    paradigm_remaining_offers: None,
                 },
                 PlayerId(0),
             ),
@@ -2323,6 +2324,7 @@ mod tests {
                     max: 3,
                     pending_cast: dummy_pending_cast(),
                     convoke_mode: None,
+                    x_cost_previews: vec![],
                 },
             ),
             (

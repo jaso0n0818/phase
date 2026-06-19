@@ -270,6 +270,11 @@ pub(super) fn handle_replacement_choice(
                         events.push(GameEvent::PermanentUntapped { object_id });
                     }
                 }
+                // CR 614.1e + CR 708.11: TurnFaceUp is performed inline in
+                // `morph::turn_face_up` (the replacement only adds its actions and
+                // does not prevent the turn-up), so there is nothing to apply on
+                // the post-replacement Execute path here.
+                ProposedEvent::TurnFaceUp { .. } => {}
                 // CR 121.1 + CR 614.6 + CR 614.11: Draw accepted after
                 // replacement choice — delegate to the shared post-replacement
                 // helper so library-zone move + per-turn accounting match the
@@ -781,6 +786,15 @@ pub(super) fn handle_copy_target_choice(
     // phantom entry trigger.
     if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
         return Ok(waiting_for);
+    }
+    // CR 702.49c: a ninjutsu entry that deferred `BatchCompletion::NinjutsuPlacement`
+    // while paused on `CopyTargetChoice` must run combat placement after the copy
+    // resolves (mirrors the `ReturnAsAuraTarget` batch drain in engine.rs).
+    if state.pending_batch_deliveries.is_some() {
+        crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Ok(state.waiting_for.clone());
+        }
     }
     Ok(WaitingFor::Priority {
         player: state.active_player,
@@ -1486,9 +1500,10 @@ mod tests {
     }
 
     /// CR 614.1c + CR 616.1 discriminating test (fail-first): a battlefield
-    /// entry that parks on a replacement-ordering prompt (two external
-    /// enter-tapped `Moved` defs — Authority of the Consuls + Imposing
-    /// Sovereign class) must, on resume, run the FULL shared delivery tail.
+    /// entry that parks on a replacement-ordering prompt (two opposite-direction
+    /// enter tap-state `Moved` defs — one enters tapped, one enters untapped:
+    /// the Frozen Aether + Spelunking class, last-applied-wins and so a material
+    /// CR 616.1e/f collision) must, on resume, run the FULL shared delivery tail.
     /// Here the missing piece is the `EntersWithAdditionalCounters` static
     /// snapshot (Kalain / Counter Lord class — "other creatures you control
     /// enter with an additional +1/+1 counter"): the divergent resume copy
@@ -1528,11 +1543,16 @@ mod tests {
             Arc::make_mut(&mut obj.base_static_definitions).push(def);
         }
 
-        // Two external enter-tapped Moved replacements on the opponent's board
-        // — the same-field collision surfaces the CR 616.1 ordering prompt.
-        for (offset, name) in [
-            (0u64, "Authority of the Consuls"),
-            (1, "Imposing Sovereign"),
+        // A genuinely *material* enter tap-state collision: one replacement makes
+        // the entering permanent enter tapped (Frozen Aether class), the other
+        // makes it enter untapped (Spelunking / Archelos class). Opposite
+        // directions are last-applied-wins, so CR 616.1e/f requires the
+        // controller to order them and the entry parks on a ReplacementChoice.
+        // (Two *same*-direction writes are idempotent and commute — they would
+        // not prompt; see replacement.rs `CommuteClass::EnterTapped`/`EnterUntapped`.)
+        for (offset, name, state_change) in [
+            (0u64, "Frozen Aether", TapStateChange::Tap),
+            (1, "Spelunking", TapStateChange::Untap),
         ] {
             let oid = ObjectId(9000 + offset);
             let mut src = GameObject::new(
@@ -1548,7 +1568,7 @@ mod tests {
                     Effect::SetTapState {
                         target: TargetFilter::SelfRef,
                         scope: EffectScope::Single,
-                        state: TapStateChange::Tap,
+                        state: state_change,
                     },
                 ))
                 .destination_zone(Zone::Battlefield)
@@ -1582,7 +1602,7 @@ mod tests {
         );
         assert!(
             matches!(result, ZoneMoveResult::NeedsChoice(_)),
-            "the enter-tapped collision must park the entry"
+            "the tap/untap (opposite-direction) collision must park the entry"
         );
         let WaitingFor::ReplacementChoice {
             player: chooser, ..
@@ -1600,7 +1620,13 @@ mod tests {
 
         let obj = &state.objects[&entrant];
         assert_eq!(obj.zone, Zone::Battlefield, "entry delivered after resume");
-        assert!(obj.tapped, "both enter-tapped replacements applied");
+        // CR 616.1e/f: opposite-direction tap-state writes are last-applied-wins.
+        // The chosen order (`index: 0`) lands the untapped write last, so the
+        // resumed entry is untapped — confirming the chosen ordering was honored.
+        assert!(
+            !obj.tapped,
+            "the chosen ordering's last-applied untap write must win on the resumed entry"
+        );
         assert_eq!(
             *obj.counters.get(&CounterType::Plus1Plus1).unwrap_or(&0),
             1,

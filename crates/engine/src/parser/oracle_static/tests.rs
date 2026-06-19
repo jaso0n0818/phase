@@ -2606,7 +2606,9 @@ fn static_this_spell_cost_less_if_it_targets_spell_or_ability_targeting_large_cr
             if filters.iter().any(|f| matches!(f, TargetFilter::StackSpell))
                 && filters
                     .iter()
-                    .any(|f| matches!(f, TargetFilter::StackAbility { controller: None, tag: None }))
+                    .any(|f| matches!(f, TargetFilter::StackAbility { controller: None, tag: None,
+        kind: None,
+        }))
     )));
     let stack_targets_filter = filters
         .iter()
@@ -7434,6 +7436,41 @@ fn graveyard_keyword_grant_clause_escape() {
 }
 
 #[test]
+fn graveyard_keyword_grant_clause_non_lesson_instant_sorcery() {
+    let (filter, kind) = try_parse_graveyard_keyword_grant_clause(
+        "Each non-Lesson instant and sorcery card in your graveyard has flashback.",
+    )
+    .expect("non-Lesson instant/sorcery graveyard flashback");
+    assert_eq!(kind, GraveyardGrantedKeywordKind::Flashback);
+    let has_non_lesson = |tf: &TypedFilter| {
+        tf.type_filters.iter().any(|f| {
+            matches!(
+                f,
+                TypeFilter::Non(boxed) if matches!(**boxed, TypeFilter::Subtype(ref s) if s == "Lesson")
+            )
+        })
+    };
+    match filter {
+        TargetFilter::Or { ref filters } => {
+            assert_eq!(filters.len(), 2);
+            assert!(
+                filters.iter().all(|branch| {
+                    let TargetFilter::Typed(tf) = branch else {
+                        return false;
+                    };
+                    has_non_lesson(tf)
+                        && tf.properties.contains(&FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        })
+                }),
+                "each branch should be non-Lesson instant/sorcery in graveyard: {filter:?}"
+            );
+        }
+        other => panic!("expected Or filter, got {other:?}"),
+    }
+}
+
+#[test]
 fn graveyard_keyword_grant_clause_rejects_non_you_scope() {
     let clause = try_parse_graveyard_keyword_grant_clause(
         "Each nonland card in their graveyard has escape.",
@@ -7442,6 +7479,61 @@ fn graveyard_keyword_grant_clause_rejects_non_you_scope() {
         clause.is_none(),
         "only your graveyard scope is currently supported"
     );
+}
+
+#[test]
+fn iroh_non_lesson_graveyard_flashback_self_mana_cost() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::keywords::{FlashbackCost, Keyword};
+
+    let parsed = parse_oracle_text(
+        "During your turn, each non-Lesson instant and sorcery card in your graveyard has flashback. The flashback cost is equal to that card's mana cost.",
+        "Iroh, Grand Lotus",
+        &[],
+        &["Creature".to_string(), "Planeswalker".to_string()],
+        &[],
+    );
+    let non_lesson = parsed
+        .statics
+        .iter()
+        .find(|def| {
+            def.condition == Some(StaticCondition::DuringYourTurn)
+                && matches!(
+                    def.modifications.first(),
+                    Some(ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
+                    })
+                )
+        })
+        .expect("non-Lesson graveyard flashback static");
+    assert_eq!(non_lesson.condition, Some(StaticCondition::DuringYourTurn));
+    let TargetFilter::Or { filters } = non_lesson.affected.as_ref().expect("affected filter")
+    else {
+        panic!("expected Or filter for instant/sorcery");
+    };
+    assert_eq!(filters.len(), 2);
+    for branch in filters {
+        let TargetFilter::Typed(tf) = branch else {
+            panic!("expected typed branch");
+        };
+        assert!(
+            tf.type_filters.iter().any(|f| matches!(
+                f,
+                TypeFilter::Non(boxed) if matches!(**boxed, TypeFilter::Subtype(ref s) if s == "Lesson")
+            )),
+            "missing Non(Lesson): {:?}",
+            tf.type_filters
+        );
+        assert!(tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+    }
+    match &non_lesson.modifications[0] {
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
+        } => {}
+        other => panic!("expected SelfManaCost flashback, got {other:?}"),
+    }
 }
 
 // --- Graveyard play permission tests (Crucible of Worlds / Icetill Explorer) ---
@@ -7742,6 +7834,82 @@ fn persistent_exile_play_permission_matrix_form() {
         def.affected,
         Some(TargetFilter::Any),
         "the persistent pool is the scope; affected must be Any"
+    );
+}
+
+/// Issue #717 — Evendo Brushrazer's condition-gated persistent exile-play
+/// permission uses the compact "you may play cards exiled with ~" wording,
+/// rather than the Matrix-style "play lands and cast spells from among ..."
+/// wording. It must still lower to the same persistent Play permission, with
+/// the sacrificed-permanent condition attached to the static.
+#[test]
+fn persistent_exile_play_permission_evendo_sacrificed_permanent_gate() {
+    let text = "During your turn, as long as you've sacrificed a nontoken permanent this turn, you may play cards exiled with ~.";
+    let def = parse_static_line(text).expect("Evendo static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::YourTurnOnly,
+        },
+        "expected persistent your-turn Play permission, got {:?}",
+        def.mode
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Any),
+        "the persistent pool is the scope; affected must be Any"
+    );
+
+    let condition = def
+        .condition
+        .as_ref()
+        .expect("Evendo permission must keep its sacrificed-permanent gate");
+    match condition {
+        StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::SacrificedThisTurn {
+                            player: PlayerScope::Controller,
+                            filter:
+                                TargetFilter::Typed(TypedFilter {
+                                    type_filters,
+                                    properties,
+                                    ..
+                                }),
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } => {
+            assert_eq!(type_filters, &vec![TypeFilter::Permanent]);
+            assert!(
+                properties.contains(&FilterProp::NonToken),
+                "condition filter must preserve nontoken permanent qualifier: {properties:?}"
+            );
+        }
+        other => panic!("expected SacrificedThisTurn permanent gate, got {other:?}"),
+    }
+
+    let card_text = "During your turn, as long as you've sacrificed a nontoken permanent this turn, you may play cards exiled with Evendo Brushrazer.";
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        card_text,
+        "Evendo Brushrazer",
+        &[],
+        &["Creature".to_string()],
+        &["Brushwagg".to_string()],
+    );
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|parsed_def| parsed_def.mode == def.mode && parsed_def.condition == def.condition),
+        "full Oracle dispatch must route Evendo's line to the same static, got {:?}",
+        parsed.statics
     );
 }
 
@@ -9568,6 +9736,74 @@ fn static_enchanted_creature_cant_be_blocked() {
         def.affected,
         Some(TargetFilter::Typed(
             TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+        ))
+    );
+}
+
+#[test]
+fn static_subject_creatures_you_control_pt_1_or_less_cant_be_blocked() {
+    // CR 509.1b: Tetsuko Umezawa, Fugitive — evasion applies to the typed
+    // subject, not SelfRef (~).
+    let def = parse_static_line(
+        "Creatures you control with power or toughness 1 or less can't be blocked.",
+    )
+    .expect("should parse subject-scoped can't be blocked");
+    assert_eq!(def.mode, StaticMode::CantBeBlocked);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 1 },
+                        },
+                        FilterProp::PtComparison {
+                            stat: PtStat::Toughness,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
+                }])
+        ))
+    );
+    assert!(def.condition.is_none());
+}
+
+#[test]
+fn static_subject_creatures_you_control_pt_1_or_less_cant_be_blocked_typographic_apostrophe() {
+    // CR 509.1b: reprints may use U+2019 RIGHT SINGLE QUOTATION MARK.
+    let def = parse_static_line(
+        "Creatures you control with power or toughness 1 or less can\u{2019}t be blocked.",
+    )
+    .expect("should parse subject-scoped can't be blocked with typographic apostrophe");
+    assert_eq!(def.mode, StaticMode::CantBeBlocked);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 1 },
+                        },
+                        FilterProp::PtComparison {
+                            stat: PtStat::Toughness,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
+                }])
         ))
     );
 }
@@ -17563,4 +17799,396 @@ fn ratonhnhaketon_hasnt_dealt_damage_gates_hexproof_and_cant_be_blocked() {
         .expect("missing conditional can't-be-blocked static");
     assert_eq!(evasion.affected, Some(TargetFilter::SelfRef));
     assert_eq!(evasion.condition, expected_condition);
+}
+
+#[test]
+fn self_static_resolves_it_pronoun_subject_to_source() {
+    // CR 611.3a: "it" in a self-referential static gate refers to the source, so
+    // "as long as it's untapped" must type to the same Not(SourceIsTapped) as the
+    // explicit "~ is untapped" form — not fall through to Unrecognized.
+    // Discriminating: before resolving the pronoun this came back Unrecognized.
+    let def = parse_static_line("This creature gets +0/+3 as long as it's untapped.")
+        .expect("self static def");
+    assert!(
+        matches!(
+            def.condition.as_ref(),
+            Some(StaticCondition::Not { condition })
+                if matches!(condition.as_ref(), StaticCondition::SourceIsTapped)
+        ),
+        "expected Not(SourceIsTapped), got {:?}",
+        def.condition
+    );
+}
+
+#[test]
+fn aura_static_does_not_bind_it_pronoun_to_source() {
+    // The Aura's "it" refers to the enchanted creature, NOT the Aura source, so it
+    // must NOT collapse to Not(SourceIsTapped) (which would silently check the
+    // Aura's own untapped state). An honest gap is correct here.
+    let defs = parse_static_line_multi("Enchanted creature has shroud as long as it's untapped.");
+    for d in &defs {
+        assert!(
+            !matches!(
+                d.condition.as_ref(),
+                Some(StaticCondition::Not { condition })
+                    if matches!(condition.as_ref(), StaticCondition::SourceIsTapped)
+            ),
+            "Aura 'it' must not resolve to the source, got {:?}",
+            d.condition
+        );
+    }
+}
+
+/// CR 702.16p: Benevolent Blessing — "Enchanted creature has protection from the
+/// chosen color. This effect doesn't remove Auras and Equipment you control that
+/// are already attached to it." The trailing inert SBA-exemption sentence must be
+/// dropped so the keyword token reaches `parse_protection_target` clean and yields
+/// `Protection(ChosenColor)` — NOT a bogus `Protection(CardType(_))` swallowing
+/// the trailing prose. (fail-if-reverted)
+#[test]
+fn protection_chosen_color_drops_trailing_sba_exemption_benevolent_blessing() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let mods = parse_continuous_modifications(
+        "Enchanted creature has protection from the chosen color. This effect doesn't remove Auras and Equipment you control that are already attached to it.",
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }),
+        "expected Protection(ChosenColor), got {mods:?}"
+    );
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::CardType(_)),
+            }
+        )),
+        "trailing prose must not be swallowed into Protection(CardType(_)), got {mods:?}"
+    );
+}
+
+/// CR 702.16n: Pentarch Ward variant — the trailing sentence references "this
+/// Aura" (no internal " and "), exercising the single-leg split path. Must still
+/// yield `Protection(ChosenColor)`. (fail-if-reverted)
+#[test]
+fn protection_chosen_color_drops_trailing_this_aura_exemption() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let mods = parse_continuous_modifications(
+        "Enchanted creature has protection from the chosen color. This effect doesn't remove this Aura.",
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }),
+        "expected Protection(ChosenColor), got {mods:?}"
+    );
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::CardType(_)),
+            }
+        )),
+        "trailing prose must not be swallowed into Protection(CardType(_)), got {mods:?}"
+    );
+}
+
+/// Building-block: `push_grant_clause_modifications` must drop the trailing prose
+/// sentence directly on the bare keyword leg and emit one
+/// `Protection(ChosenColor)`. (fail-if-reverted)
+#[test]
+fn push_grant_clause_drops_trailing_sentence_chosen_color() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let mut mods = Vec::new();
+    push_grant_clause_modifications(
+        &mut mods,
+        "protection from the chosen color. this effect doesn't remove auras",
+        None,
+    );
+    assert_eq!(
+        mods,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }],
+        "expected exactly one Protection(ChosenColor), got {mods:?}"
+    );
+}
+
+/// No-regression: a plain chosen-color grant with NO trailing ". " sentence is
+/// unchanged (split returns None).
+#[test]
+fn protection_chosen_color_plain_unchanged() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let mods =
+        parse_continuous_modifications("Enchanted creature has protection from the chosen color.");
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }),
+        "expected Protection(ChosenColor), got {mods:?}"
+    );
+}
+
+/// No-regression: Glory's duration form "protection from the chosen color until
+/// end of turn" — the duration is stripped, no truncation, still ChosenColor.
+#[test]
+fn protection_chosen_color_duration_form_glory() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let mods = parse_continuous_modifications(
+        "Creatures you control gain protection from the chosen color until end of turn",
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }),
+        "expected Protection(ChosenColor), got {mods:?}"
+    );
+}
+
+/// No-regression: single-color protection still parses to Color(Red).
+#[test]
+fn protection_single_color_unchanged() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    use crate::types::mana::ManaColor;
+
+    let mods = parse_continuous_modifications("Enchanted creature has protection from red.");
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)),
+        }),
+        "expected Protection(Color(Red)), got {mods:?}"
+    );
+}
+
+/// CR 702.16a + CR 105.2a: "protection from monocolored" (Guardian of the
+/// Guildpact, Providence of Night) parses end-to-end to the runtime-evaluated
+/// `Quality("monocolored")` (source.color.len() == 1), NOT an inert
+/// `CardType("monocolored")`. Fails if the parse_protection_target fix reverts.
+#[test]
+fn protection_from_monocolored_is_quality() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let mods =
+        parse_continuous_modifications("Enchanted creature has protection from monocolored.");
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::Quality("monocolored".to_string())),
+        }),
+        "expected Protection(Quality(\"monocolored\")), got {mods:?}"
+    );
+}
+
+/// Broader Ward-cycle class: a single-color Ward with a trailing sentence (Red
+/// Ward form) recovers the keyword via the same ". " split → Color(Red).
+#[test]
+fn protection_single_color_with_trailing_sentence_red_ward() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    use crate::types::mana::ManaColor;
+
+    let mods = parse_continuous_modifications(
+        "Enchanted creature has protection from red. This effect doesn't remove this Aura.",
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)),
+        }),
+        "expected Protection(Color(Red)), got {mods:?}"
+    );
+}
+
+/// No-regression: Spectra Ward's "protection from each color" still fans out to
+/// the five WUBRG protection entries (via expand_protection_parts) through the
+/// new split (the leg has no ". ").
+#[test]
+fn protection_each_color_fanout_unchanged_spectra_ward() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    use crate::types::mana::ManaColor;
+
+    let mods = parse_continuous_modifications("Enchanted creature has protection from each color.");
+    let prot: Vec<_> = mods
+        .iter()
+        .filter_map(|m| match m {
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(pt),
+            } => Some(pt.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        prot,
+        vec![
+            ProtectionTarget::Color(ManaColor::White),
+            ProtectionTarget::Color(ManaColor::Blue),
+            ProtectionTarget::Color(ManaColor::Black),
+            ProtectionTarget::Color(ManaColor::Red),
+            ProtectionTarget::Color(ManaColor::Green),
+        ],
+        "expected five WUBRG protection entries, got {mods:?}"
+    );
+}
+
+/// No-regression: a multi-keyword grant where one leg is protection still emits
+/// BOTH keywords (the " and " pre-split happens before the per-leg ". " split).
+#[test]
+fn multi_keyword_flying_and_protection_unchanged() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    use crate::types::mana::ManaColor;
+
+    let mods =
+        parse_continuous_modifications("Enchanted creature has flying and protection from red.");
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying,
+        }),
+        "missing Flying, got {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)),
+        }),
+        "missing Protection(Color(Red)), got {mods:?}"
+    );
+}
+
+/// CR 205.3m: A subtype anthem whose subject uses the "-es" plural of a
+/// sibilant/consonant+o creature subtype must resolve the canonical singular
+/// subtype in the affected filter. Zarda, the Power Princess: "Other Heroes you
+/// control have exalted." Regression — previously the naive trailing-'s' strip
+/// produced the bogus subtype "Heroe", matching no creature, so the anthem was
+/// silently inert. The assertion below flips (Subtype("Heroe")) if the
+/// parse_subtype "-es" plural arm is reverted.
+#[test]
+fn subtype_anthem_es_plural_resolves_canonical_singular() {
+    let defs = parse_static_line_multi("Other Heroes you control have exalted.");
+    let def = defs
+        .iter()
+        .find(|d| {
+            d.modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Exalted,
+                })
+        })
+        .expect("expected an exalted anthem StaticDefinition");
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype("Hero".to_string())),
+                "expected canonical Subtype(\"Hero\"), got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                !tf.type_filters
+                    .contains(&TypeFilter::Subtype("Heroe".to_string())),
+                "must not emit the de-pluralization artifact Subtype(\"Heroe\"), got {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("affected must be Typed(Heroes you control), got {other:?}"),
+    }
+}
+
+/// CR 604.1 / 613.1f: a granted QUOTED activated ability whose body contains an
+/// internal ". " must reach the quoted-ability path (GrantAbility) and NOT be
+/// truncated by the new bare-keyword ". " split — proving quoted text bypasses it.
+#[test]
+fn granted_quoted_ability_with_internal_period_bypasses_split() {
+    let mods = parse_continuous_modifications(
+        "Enchanted creature has \"{T}: Add one mana of any color. Activate this ability only as a sorcery.\"",
+    );
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::GrantAbility { .. })),
+        "expected a GrantAbility from the quoted ability, got {mods:?}"
+    );
+}
+
+/// Issue #1336: Ichormoon Gauntlet grants bracket-loyalty planeswalker abilities.
+#[test]
+fn ichormoon_gauntlet_grants_loyalty_abilities_to_planeswalkers() {
+    let mods = parse_continuous_modifications(
+        "Planeswalkers you control have \"[0]: Proliferate\" and \"[−12]: Take an extra turn after this one.\"",
+    );
+    let grants: Vec<_> = mods
+        .iter()
+        .filter_map(|m| match m {
+            ContinuousModification::GrantAbility { definition } => Some(definition.as_ref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        grants.len(),
+        2,
+        "expected two GrantAbility mods, got {mods:?}"
+    );
+    assert!(
+        matches!(grants[0].cost, Some(AbilityCost::Loyalty { amount: 0 })),
+        "first grant should be [0] loyalty proliferate, got {:?}",
+        grants[0].cost
+    );
+    assert!(
+        matches!(*grants[0].effect, Effect::Proliferate),
+        "first grant effect should be Proliferate, got {:?}",
+        grants[0].effect
+    );
+    assert!(
+        matches!(grants[1].cost, Some(AbilityCost::Loyalty { amount: -12 })),
+        "second grant should be [−12] loyalty, got {:?}",
+        grants[1].cost
+    );
+    assert!(
+        matches!(*grants[1].effect, Effect::ExtraTurn { .. }),
+        "second grant effect should be ExtraTurn, got {:?}",
+        grants[1].effect
+    );
+}
+
+#[test]
+fn damage_not_removed_during_cleanup_self_subject() {
+    // CR 514.2: "this creature" subject → SelfRef-affected DamageNotRemoved static.
+    let def = parse_static_line("Damage isn't removed from this creature during cleanup steps.")
+        .expect("self-subject cleanup-damage static");
+    assert_eq!(def.mode, StaticMode::DamageNotRemovedDuringCleanup);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn damage_not_removed_during_cleanup_filtered_subject() {
+    // CR 514.2: a typed subject ("creatures your opponents control") is carried
+    // as the affected filter (Patient Zero), not collapsed to SelfRef.
+    let def = parse_static_line(
+        "Damage isn't removed from creatures your opponents control during cleanup steps.",
+    )
+    .expect("filtered cleanup-damage static");
+    assert_eq!(def.mode, StaticMode::DamageNotRemovedDuringCleanup);
+    assert!(
+        !matches!(def.affected, Some(TargetFilter::SelfRef) | None),
+        "affected must be the typed opponent-creatures filter, got {:?}",
+        def.affected
+    );
+}
+
+#[test]
+fn damage_not_removed_during_cleanup_rejects_non_cleanup_during() {
+    // CR 514.2: the grammar anchors on the "during cleanup steps" suffix, so a
+    // "during <something-else>" sentence that merely mentions cleanup elsewhere
+    // must NOT be classified as a cleanup-damage static.
+    let def = parse_static_line(
+        "Damage isn't removed from creatures during combat this turn. Skip your cleanup step.",
+    );
+    assert!(
+        !matches!(
+            def.as_ref().map(|d| &d.mode),
+            Some(StaticMode::DamageNotRemovedDuringCleanup)
+        ),
+        "a non-\"during cleanup steps\" sentence must not be a cleanup-damage static, got {:?}",
+        def.map(|d| d.mode)
+    );
 }

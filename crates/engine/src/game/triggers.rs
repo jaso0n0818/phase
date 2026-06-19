@@ -1781,6 +1781,8 @@ fn collect_pending_triggers(
                             target: TargetFilter::SelfRef,
                             retarget: CopyRetargetPermission::MayChooseNewTargets,
                             copier: None,
+                            additional_modifications: Vec::new(),
+                            starting_loyalty_from_casualty_sacrifice: false,
                         },
                         Vec::new(),
                         *cast_obj_id,
@@ -3994,6 +3996,7 @@ fn trigger_cause_matches(
             let Some(GameEvent::ZoneChanged {
                 to: Zone::Battlefield,
                 record,
+                object_id,
                 ..
             }) = event
             else {
@@ -4005,7 +4008,15 @@ fn trigger_cause_matches(
             // CR 603.6a: The entering permanent's core types must include at
             // least one of the predicate's listed types. Panharmonicon uses
             // `[Artifact, Creature]` — either type qualifies.
-            record.core_types.iter().any(|ct| core_types.contains(ct))
+            // Use the live object's post-layer core_types if available (e.g., after
+            // Ashaya's layer effect adds the Land type). Fall back to the record's
+            // pre-layer types if the object is not in state.objects.
+            let core_types_to_check = if let Some(obj) = state.objects.get(object_id) {
+                &obj.card_types.core_types
+            } else {
+                &record.core_types
+            };
+            core_types_to_check.iter().any(|ct| core_types.contains(ct))
         }
         TriggerCause::CreatureAttacking => {
             matches!(event, Some(GameEvent::AttackersDeclared { .. }))
@@ -5341,6 +5352,21 @@ pub(crate) fn check_trigger_condition(
         } => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| counter_condition_matches(obj, counters, *minimum, *maximum)),
+        // CR 608.2c + CR 603.2 + CR 603.4: spell-cast intervening-if on targets.
+        TriggerCondition::TriggeringSpellTargetsFilter { filter } => trigger_event
+            .and_then(|event| match event {
+                GameEvent::SpellCast { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .is_some_and(|spell_id| {
+                let context_source_id = source_id.unwrap_or(spell_id);
+                super::restrictions::triggering_spell_targets_filter(
+                    state,
+                    spell_id,
+                    filter,
+                    context_source_id,
+                )
+            }),
     }
 }
 
@@ -12395,6 +12421,106 @@ pub mod tests {
     }
 
     #[test]
+    fn command_zone_phase_trigger_fires_at_controllers_upkeep() {
+        // CR 113.6b + CR 603.4: Oloro-class — a beginning-of-upkeep trigger that
+        // functions from the command zone (trigger_zones = [Command], intervening-if
+        // SourceInZone{Command}) must fire while its source sits in the command zone
+        // and the controller's upkeep begins. This is the Phase-mode counterpart to
+        // the SpellCast-mode Eminence path covered by #817 / PR #1031.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(0x010F0),
+            PlayerId(0),
+            "Oloro Stand-In".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_emblem = false;
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(Phase::Upkeep)
+                    .valid_target(TargetFilter::Controller)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 2 },
+                            player: TargetFilter::Controller,
+                        },
+                    ))
+                    .trigger_zones(vec![Zone::Command])
+                    .condition(TriggerCondition::SourceInZone {
+                        zone: Zone::Command,
+                    }),
+            );
+        }
+
+        // Drive the actual upkeep event through the collection pipeline.
+        let events = vec![GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        }];
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Command-zone beginning-of-upkeep trigger must fire while its source is in the command zone"
+        );
+    }
+
+    #[test]
+    fn command_zone_phase_trigger_does_not_fire_at_opponents_upkeep() {
+        // CR 113.6b: The same Oloro-class trigger must NOT fire during an
+        // opponent's upkeep — "your upkeep" means the controller's upkeep only.
+        let mut state = setup();
+        state.active_player = PlayerId(1); // opponent's turn
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(0x010F0),
+            PlayerId(0),
+            "Oloro Stand-In".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_emblem = false;
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(Phase::Upkeep)
+                    .valid_target(TargetFilter::Controller)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 2 },
+                            player: TargetFilter::Controller,
+                        },
+                    ))
+                    .trigger_zones(vec![Zone::Command])
+                    .condition(TriggerCondition::SourceInZone {
+                        zone: Zone::Command,
+                    }),
+            );
+        }
+
+        let events = vec![GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        }];
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "Command-zone upkeep trigger must NOT fire during opponent's upkeep"
+        );
+    }
+
+    #[test]
     fn suppress_triggers_torpor_blocks_creature_etb_observer() {
         // CR 603.2g + CR 603.6a: Torpor Orb-class static on battlefield suppresses
         // an observer's ETB trigger when a CREATURE enters. Soul Warden reading.
@@ -15047,6 +15173,79 @@ pub mod tests {
             !graveyard_state.stack.is_empty() || graveyard_state.pending_trigger.is_some(),
             "Twilight Diviner must trigger when a creature enters from a graveyard"
         );
+    }
+
+    #[test]
+    fn necroduality_runtime_copies_entering_zombie_not_enchantment_source() {
+        let trigger = crate::parser::oracle_trigger::parse_trigger_line(
+            "Whenever a nontoken Zombie you control enters, create a token that's a copy of that creature.",
+            "Necroduality",
+        );
+
+        let mut state = setup();
+        let necroduality = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Necroduality".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&necroduality).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.trigger_definitions.push(trigger);
+        }
+        let zombie = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Diregraf Ghoul".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&zombie).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Zombie".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        let zone_event = zone_changed_event(
+            zombie,
+            Zone::Stack,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            vec!["Zombie"],
+        );
+        process_triggers(&mut state, &[zone_event]);
+        assert_eq!(state.stack.len(), 1, "Necroduality trigger must be stacked");
+
+        let mut events = Vec::new();
+        stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.last_created_token_ids.len(),
+            1,
+            "Necroduality must create one copy token"
+        );
+        let token = state.objects.get(&state.last_created_token_ids[0]).unwrap();
+        assert_eq!(
+            token.name, "Diregraf Ghoul",
+            "the copy token must copy the entering Zombie, not Necroduality"
+        );
+        assert!(
+            token.card_types.core_types.contains(&CoreType::Creature),
+            "the token must keep the copied creature type line"
+        );
+        assert!(
+            token.card_types.subtypes.iter().any(|s| s == "Zombie"),
+            "the token must keep the copied Zombie subtype"
+        );
+        assert_eq!(token.base_power, Some(2));
+        assert_eq!(token.base_toughness, Some(2));
     }
 
     fn install_twilight_diviner_trigger(
@@ -18951,6 +19150,65 @@ pub mod tests {
         );
     }
 
+    #[test]
+    fn midnight_reaper_self_sacrifice_fires_own_nontoken_creature_dies_trigger() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let reaper = make_creature(&mut state, PlayerId(0), "Midnight Reaper", 3, 2);
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Whenever a nontoken creature you control dies, this creature deals 1 damage to you and you draw a card.",
+            "Midnight Reaper",
+            &[],
+            &[String::from("Creature")],
+            &[],
+        );
+        assert_eq!(parsed.triggers.len(), 1);
+        let trigger = parsed.triggers[0].clone();
+        let valid_card = trigger
+            .valid_card
+            .as_ref()
+            .expect("Midnight Reaper trigger must filter the dying creature");
+        let TargetFilter::Typed(typed) = valid_card else {
+            panic!("expected typed dying-creature filter, got {valid_card:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.properties.contains(&FilterProp::NonToken));
+        assert!(
+            !typed.properties.contains(&FilterProp::Another),
+            "Midnight Reaper must observe itself; the text does not say another"
+        );
+
+        {
+            let obj = state.objects.get_mut(&reaper).expect("reaper exists");
+            obj.trigger_definitions.push(trigger.clone());
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
+        }
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, reaper, Zone::Graveyard, &mut events);
+
+        let pending = collect_pending_triggers(&mut state, &events);
+        let reaper_triggers: Vec<_> = pending
+            .iter()
+            .filter(|context| context.pending.source_id == reaper)
+            .collect();
+        assert_eq!(
+            reaper_triggers.len(),
+            1,
+            "Midnight Reaper should trigger when its controller sacrifices it"
+        );
+        assert!(
+            matches!(
+                reaper_triggers[0].pending.ability.effect,
+                Effect::DealDamage { .. }
+            ),
+            "parsed trigger should start with the self-damage effect"
+        );
+    }
+
     /// A "whenever a creature dies" observer (Blood Artist class) for tests.
     fn add_dies_observer(state: &mut GameState, owner: PlayerId) -> ObjectId {
         let observer = make_creature(state, owner, "Blood Artist Stand-In", 0, 1);
@@ -19334,6 +19592,7 @@ pub mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            library_position: None,
             is_cost_payment: false,
         };
 
@@ -21220,6 +21479,28 @@ mod dedup_regression_tests {
         id
     }
 
+    fn install_delney(state: &mut GameState) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(103),
+            PlayerId(0),
+            "Delney, Streetwise Lookout".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(
+                crate::parser::oracle_static::parse_static_line(
+                    "If a triggered ability of a creature you control with power 2 or less triggers, that ability triggers an additional time.",
+                )
+                .expect("expected Delney trigger-doubler static"),
+            );
+        id
+    }
+
     /// CR 603.2d: Splinter's source filter ("a Ninja creature you control")
     /// doubles a Ninja source's trigger to 2 instances.
     #[test]
@@ -21378,6 +21659,113 @@ mod dedup_regression_tests {
         assert_eq!(
             observer_triggers, 1,
             "Harmonic Prodigy must not double unrelated controlled source triggers"
+        );
+    }
+
+    /// CR 603.2d: Delney's parsed power-filtered source clause doubles a
+    /// controlled creature with power 2 or less.
+    #[test]
+    fn delney_parsed_static_doubles_low_power_creature_trigger() {
+        let (mut state, observer) = setup_with_observer(TriggerMode::Attacks);
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        let _delney = install_delney(&mut state);
+
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![observer],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                observer,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+        let observer_triggers = state
+            .stack
+            .iter()
+            .filter(|e| e.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_triggers, 2,
+            "Delney must double a power-2-or-less creature source's trigger"
+        );
+    }
+
+    /// CR 603.2d: Delney must not double triggers from creatures with power
+    /// greater than 2.
+    #[test]
+    fn delney_parsed_static_does_not_double_high_power_creature_trigger() {
+        let (mut state, observer) = setup_with_observer(TriggerMode::Attacks);
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+        }
+
+        let _delney = install_delney(&mut state);
+
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![observer],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                observer,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+        let observer_triggers = state
+            .stack
+            .iter()
+            .filter(|e| e.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_triggers, 1,
+            "Delney must not double a power-greater-than-2 creature source's trigger"
+        );
+    }
+
+    /// CR 603.2d: Delney must not double triggered abilities from non-creature
+    /// permanents you control.
+    #[test]
+    fn delney_parsed_static_does_not_double_non_creature_source_trigger() {
+        let (mut state, observer) = setup_with_observer(TriggerMode::Attacks);
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.subtypes.clear();
+        }
+
+        let _delney = install_delney(&mut state);
+
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![observer],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                observer,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+        let observer_triggers = state
+            .stack
+            .iter()
+            .filter(|e| e.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_triggers, 1,
+            "Delney must not double non-creature source triggers"
         );
     }
 
@@ -23426,6 +23814,7 @@ mod push_first_contract_tests {
             allow_repeat_modes: false,
             constraints: vec![],
             mode_costs: vec![],
+            mode_pawprints: vec![],
             entwine_cost: None,
             chooser: PlayerFilter::Controller,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -23537,6 +23926,7 @@ mod push_first_contract_tests {
             allow_repeat_modes: false,
             constraints: vec![],
             mode_costs: vec![],
+            mode_pawprints: vec![],
             entwine_cost: None,
             chooser: PlayerFilter::Controller,
             // The axis under test: the game selects the mode at random.

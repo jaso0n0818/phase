@@ -563,6 +563,21 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
             StaticCondition::IsMonarch,
             alt((tag("you're the monarch"), tag("you are the monarch"))),
         ),
+        // CR 725.1: "if an opponent is the monarch" — a monarch exists and it
+        // is not the controller. Distinct from `Not(IsMonarch)` (also true when
+        // no monarch exists) and from `NoMonarch` (true only when vacant).
+        map(tag("an opponent is the monarch"), |_| {
+            StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::Not {
+                        condition: Box::new(StaticCondition::IsMonarch),
+                    },
+                    StaticCondition::Not {
+                        condition: Box::new(StaticCondition::NoMonarch),
+                    },
+                ],
+            }
+        }),
         // CR 726.3: Initiative status
         value(
             StaticCondition::IsInitiative,
@@ -3052,7 +3067,13 @@ fn parse_source_in_zone_condition(input: &str) -> OracleResult<'_, StaticConditi
         value(false, tag(" is")),
     ))
     .parse(rest)?;
-    let (rest, first) = parse_zone_phrase(rest)?;
+    // CR 701.13a + CR 113.6b: passive "is exiled" is equivalent to "is in
+    // exile" for source-referential intervening-if gates (Cosima, God of the
+    // Voyage's granted landfall trigger: "if ~ is exiled"). Match the leading
+    // space left by `tag(" is")` — do not trim_start or `parse_zone_phrase`
+    // loses its " in your graveyard" boundary.
+    let (rest, first) =
+        alt((map(tag(" exiled"), |_| Zone::Exile), parse_zone_phrase)).parse(rest)?;
     // CR 113.6b: a single ability that names multiple zones functions in each
     // of them — the "or"-separated zone list composes disjunctively across the
     // listed zones. ("or" is English grammar, not a CR construct; the rules
@@ -5879,6 +5900,34 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
     Ok((rest, (filter, negated)))
 }
 
+/// CR 603.12 + CR 608.2c: Parse "you put [quantifier] [type] onto the battlefield
+/// this way" — the active-voice reflexive gate (Gilgamesh, Master-at-Arms:
+/// "When you put one or more Equipment onto the battlefield this way, you may
+/// attach one of them to a Samurai you control."). Semantically identical to the
+/// passive `parse_zone_changed_this_way_clause` existential check against
+/// `state.last_zone_changed_ids`.
+pub fn parse_you_put_onto_battlefield_this_way_clause(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, bool)> {
+    let (rest, _) = tag("you put ").parse(input)?;
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("at least one ")),
+        value((), tag("one or more ")),
+        parse_article,
+    ))
+    .parse(rest)?;
+    let (filter, after_filter) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let after_filter = after_filter.trim_start();
+    let (rest, _) = tag("onto the battlefield this way").parse(after_filter)?;
+    Ok((rest, (filter, false)))
+}
+
 /// CR 603.12 + CR 608.2c: Recognize a leading reflexive-conditional connector
 /// and return the corresponding AbilityCondition with the connector consumed.
 /// Single authority for this set; consumed by both
@@ -7187,6 +7236,26 @@ mod tests {
     }
 
     // -- Zone condition tests (Phase 1) --
+
+    #[test]
+    fn test_source_is_exiled_passive() {
+        let (rest, c) = parse_zone_conditions("~ is exiled").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::SourceInZone {
+                zone: crate::types::zones::Zone::Exile
+            }
+        ));
+        let (rest, c) = parse_inner_condition("~ is exiled").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::SourceInZone {
+                zone: crate::types::zones::Zone::Exile
+            }
+        ));
+    }
 
     #[test]
     fn test_source_in_hand() {
@@ -8591,6 +8660,25 @@ mod tests {
         let (rest, c) = parse_inner_condition("you are the monarch").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::IsMonarch);
+    }
+
+    #[test]
+    fn test_an_opponent_is_the_monarch() {
+        let (rest, c) = parse_inner_condition("an opponent is the monarch").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::Not {
+                        condition: Box::new(StaticCondition::IsMonarch),
+                    },
+                    StaticCondition::Not {
+                        condition: Box::new(StaticCondition::NoMonarch),
+                    },
+                ],
+            }
+        );
     }
 
     #[test]
@@ -11525,16 +11613,34 @@ mod tests {
         .unwrap();
         assert_eq!(rest, ", you may attach it to a creature you control");
         assert!(!negated);
-        // Subtype Equipment must round-trip (parse_type_phrase canonicalizes
-        // "equipment" → Subtype::Equipment via the oracle subtype dictionary).
         match filter {
             TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
-                assert!(
-                    type_filters
-                        .iter()
-                        .any(|f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))),
-                    "expected Subtype Equipment, got {type_filters:?}"
-                );
+                assert!(type_filters.iter().any(
+                    |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
+                ));
+            }
+            other => panic!("expected Typed Equipment, got {other:?}"),
+        }
+    }
+
+    /// CR 603.12: Gilgamesh active-voice reflexive gate — "you put one or more
+    /// [type] onto the battlefield this way".
+    #[test]
+    fn test_you_put_onto_battlefield_this_way_equipment() {
+        let (rest, (filter, negated)) = parse_you_put_onto_battlefield_this_way_clause(
+            "you put one or more equipment onto the battlefield this way, you may attach one of them to a samurai you control",
+        )
+        .unwrap();
+        assert_eq!(
+            rest,
+            ", you may attach one of them to a samurai you control"
+        );
+        assert!(!negated);
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(type_filters.iter().any(
+                    |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
+                ));
             }
             other => panic!("expected Typed Equipment, got {other:?}"),
         }

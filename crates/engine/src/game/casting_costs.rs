@@ -838,7 +838,10 @@ fn finish_pending_cost_or_cast(
             &modal,
             &pending.ability.context,
         );
-        capped.max_choices = capped.max_choices.min(capped.mode_count);
+        // CR 700.2i: pawprint modals use the point budget, not a mode-count cap.
+        if capped.mode_pawprints.is_empty() {
+            capped.max_choices = capped.max_choices.min(capped.mode_count);
+        }
         pending.target_constraints = target_constraints_from_modal(&capped);
         let mode_abilities = state
             .objects
@@ -2538,7 +2541,10 @@ pub(super) fn begin_modal_additional_cost_declaration(
     else {
         let mut capped =
             modal_choice_for_player(state, player, object_id, &modal, &ability.context);
-        capped.max_choices = capped.max_choices.min(capped.mode_count);
+        // CR 700.2i: pawprint modals use the point budget, not a mode-count cap.
+        if capped.mode_pawprints.is_empty() {
+            capped.max_choices = capped.max_choices.min(capped.mode_count);
+        }
         let mut pending = PendingCast::new(object_id, card_id, ability, cost);
         pending.base_cost = base_cost;
         pending.casting_variant = casting_variant;
@@ -3641,12 +3647,15 @@ fn pay_additional_cost_with_source(
             let cost = prepend_deferred_required_cost(cost, &mut pending);
             pending.additional_cost_flow = Some(AdditionalCost::Required(cost));
             state.pending_cast = Some(Box::new(pending.clone()));
+            let x_cost_previews =
+                super::casting::build_choose_x_cost_previews(state, player, &pending, min, max);
             return Ok(WaitingFor::ChooseXValue {
                 player,
                 min,
                 max,
                 pending_cast: Box::new(pending),
                 convoke_mode: None,
+                x_cost_previews,
             });
         }
     }
@@ -6973,12 +6982,20 @@ pub fn enter_payment_step(
                 )));
             }
             let pending_cast = pending.clone();
+            let x_cost_previews = super::casting::build_choose_x_cost_previews(
+                state,
+                player,
+                &pending_cast,
+                min,
+                max,
+            );
             return Ok(WaitingFor::ChooseXValue {
                 player,
                 min,
                 max,
                 pending_cast,
                 convoke_mode,
+                x_cost_previews,
             });
         }
 
@@ -7709,6 +7726,8 @@ mod tests {
 
     use super::*;
     use crate::game::engine::apply_as_current;
+    use crate::game::engine_resolution_choices::handle_resolution_choice;
+    use crate::game::scenario::GameScenario;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
@@ -13442,6 +13461,232 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
             !runner.state().cancelled_casts.contains(&spell_id),
             "a completed multikicker cast must not be in cancelled_casts"
         );
+    }
+
+    /// Issue #738 (Consult the Star Charts): "Kicker {1}{U} ... Look at the
+    /// top X cards of your library, where X is the number of lands you
+    /// control. Put one of those cards into your hand. If this spell was
+    /// kicked, put two of those cards into your hand instead. Put the rest
+    /// on the bottom of your library in a random order." Reported to draw 0
+    /// cards both kicked and unkicked. Drives the *real* end-to-end pipeline
+    /// (`CastSpell` -> `OptionalCostChoice` kicker decision -> mana payment ->
+    /// stack resolution -> `DigChoice`) from Oracle text — no `CardDatabase`
+    /// involved — to discriminate a cast-pipeline defect from the isolated
+    /// `resolve_ability_chain` unit coverage in `effects::dig::tests`.
+    const CONSULT_THE_STAR_CHARTS_ORACLE: &str = "Kicker {1}{U} (You may pay an additional \
+{1}{U} as you cast this spell.)\nLook at the top X cards of your library, where X is the \
+number of lands you control. Put one of those cards into your hand. If this spell was \
+kicked, put two of those cards into your hand instead. Put the rest on the bottom of your \
+library in a random order.";
+
+    fn consult_the_star_charts_scenario(
+        num_lands: usize,
+    ) -> (crate::game::scenario::GameRunner, ObjectId, CardId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+
+        for _ in 0..num_lands {
+            scenario.add_basic_land(PlayerId(0), ManaColor::Blue);
+        }
+        for i in 0..5 {
+            scenario.add_spell_to_library_top(PlayerId(0), &format!("Library Card {i}"), false);
+        }
+
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Consult the Star Charts",
+            true,
+            CONSULT_THE_STAR_CHARTS_ORACLE,
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        });
+        let spell_id = builder.id();
+        let card_id = scenario.state.objects[&spell_id].card_id;
+
+        let runner = scenario.build();
+        (runner, spell_id, card_id)
+    }
+
+    fn fund_blue(runner: &mut crate::game::scenario::GameRunner, count: usize) {
+        let p0 = runner
+            .state_mut()
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap();
+        for _ in 0..count {
+            p0.mana_pool.add(ManaUnit {
+                color: ManaType::Blue,
+                source_id: ObjectId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+    }
+
+    fn cast_consult_the_star_charts(kick: bool) -> usize {
+        let (mut runner, spell_id, card_id) = consult_the_star_charts_scenario(3);
+        fund_blue(&mut runner, 3); // {1}{U} base + {1}{U} kicker, generic from blue too
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("casting Consult the Star Charts must be accepted");
+
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { cost, .. } => {
+                assert!(
+                    matches!(cost, AdditionalCost::Kicker { .. }),
+                    "kicker decision prompt must carry a real Kicker cost: {cost:?}"
+                );
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: kick })
+                    .expect("kicker decision must be accepted");
+            }
+            other => panic!("expected OptionalCostChoice for kicker, got {other:?}"),
+        }
+
+        runner.advance_until_stack_empty();
+
+        if let WaitingFor::DigChoice {
+            selectable_cards,
+            keep_count,
+            ..
+        } = runner.state().waiting_for.clone()
+        {
+            let chosen: Vec<_> = selectable_cards.into_iter().take(keep_count).collect();
+            let mut events = Vec::new();
+            let waiting = runner.state().waiting_for.clone();
+            handle_resolution_choice(
+                runner.state_mut(),
+                waiting,
+                GameAction::SelectCards { cards: chosen },
+                &mut events,
+            )
+            .expect("DigChoice resolution must succeed");
+        }
+
+        runner.state().players[0].hand.len()
+    }
+
+    #[test]
+    fn consult_the_star_charts_unkicked_draws_one_card_via_full_cast_pipeline() {
+        let hand_after = cast_consult_the_star_charts(false);
+        assert_eq!(
+            hand_after, 1,
+            "unkicked Consult the Star Charts must put exactly 1 card into hand \
+             via the real cast pipeline (issue #738)"
+        );
+    }
+
+    #[test]
+    fn consult_the_star_charts_kicked_draws_two_cards_via_full_cast_pipeline() {
+        let hand_after = cast_consult_the_star_charts(true);
+        assert_eq!(
+            hand_after, 2,
+            "kicked Consult the Star Charts must put exactly 2 cards into hand \
+             via the real cast pipeline (issue #738)"
+        );
+    }
+
+    // ─── Memory Deluge (issue #843) ─────────────────────────────────────────
+    //
+    // Oracle: "Look at the top X cards of your library, where X is the amount
+    // of mana spent to cast this spell. Put two of them into your hand and the
+    // rest on the bottom of your library in a random order.
+    // Flashback {5}{U}{U}"
+    //
+    // The Dig resolver reads `QuantityRef::ManaSpentToCast { SelfObject, Total }`
+    // which resolves via `obj.mana_spent_to_cast_amount` on the spell object.
+    // If the payment-write seam fails to stamp that field, the count resolves
+    // to 0 and the Dig silently no-ops (CR 401.5 clamp → early return).
+    //
+    // This test drives the REAL cast pipeline (`CastSpell` → mana payment →
+    // stack resolution → `DigChoice`) to discriminate a payment-write defect
+    // from the isolated `resolve_ability_chain` unit coverage in
+    // `effects::dig::tests`.
+
+    const MEMORY_DELUGE_ORACLE: &str = "Look at the top X cards of your library, \
+where X is the amount of mana spent to cast this spell. Put two of them into your \
+hand and the rest on the bottom of your library in a random order.\n\
+Flashback {5}{U}{U}";
+
+    /// CR 601.2h + CR 608.2c: Casting Memory Deluge for {2}{U}{U} (4 total mana)
+    /// must surface a DigChoice with exactly 4 selectable cards.
+    #[test]
+    fn memory_deluge_dig_count_equals_mana_spent_via_full_cast_pipeline() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+
+        // 6 distinguishable cards on top of library (more than we'll look at)
+        for i in 0..6 {
+            scenario.add_spell_to_library_top(PlayerId(0), &format!("Library Card {i}"), false);
+        }
+
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Memory Deluge",
+            true, // instant
+            MEMORY_DELUGE_ORACLE,
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 2,
+        });
+        let spell_id = builder.id();
+        let card_id = scenario.state.objects[&spell_id].card_id;
+
+        let mut runner = scenario.build();
+
+        // Fund the mana pool with exactly 4 mana ({2}{U}{U})
+        fund_blue(&mut runner, 2);
+        fund_colorless(&mut runner, 2);
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("casting Memory Deluge must be accepted");
+
+        // Advance past any optional-cost prompts (Flashback is an alt cost,
+        // not relevant here since we're casting from hand)
+        runner.advance_until_stack_empty();
+
+        // The engine must surface a DigChoice with count = 4 (mana spent)
+        match &runner.state().waiting_for {
+            WaitingFor::DigChoice {
+                selectable_cards,
+                keep_count,
+                ..
+            } => {
+                assert_eq!(
+                    selectable_cards.len(),
+                    4,
+                    "Memory Deluge cast for {{2}}{{U}}{{U}} (4 mana) must look at \
+                     top 4 cards; got {} (issue #843). If 0, the payment-write seam \
+                     failed to stamp mana_spent_to_cast_amount on the spell object.",
+                    selectable_cards.len()
+                );
+                assert_eq!(*keep_count, 2, "Memory Deluge must keep exactly 2 cards");
+            }
+            other => panic!(
+                "expected WaitingFor::DigChoice after Memory Deluge resolution, \
+                 got {other:?}. If Priority, the Dig resolved to count=0 and \
+                 silently no-op'd (issue #843)."
+            ),
+        }
     }
 
     /// Engine test 2 — declining the kicker at the first prompt COMPLETES the

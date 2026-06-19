@@ -26,6 +26,7 @@ use crate::types::proposed_event::{
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
+use super::ability_utils::build_resolved_from_def;
 use super::game_object::GameObject;
 
 // CR 122.1c shield-counter effects are intrinsic to counters, not stored
@@ -737,6 +738,7 @@ fn pay_replacement_may_cost(
                         && matches!(
                             state.waiting_for,
                             WaitingFor::EffectZoneChoice {
+                                library_position: None,
                                 is_cost_payment: true,
                                 ..
                             }
@@ -1243,6 +1245,21 @@ fn damage_done_applier(
 
     // No modification and no prevention shield — pass through
     ApplyResult::Modified(event)
+}
+
+/// CR 614.5: Mark a one-shot replacement as consumed after it successfully applies.
+fn mark_replacement_consumed(state: &mut GameState, rid: ReplacementId) {
+    let repl = if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get_mut(rid.index)
+    } else {
+        state
+            .objects
+            .get_mut(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get_mut(rid.index))
+    };
+    if let Some(repl) = repl {
+        repl.is_consumed = true;
+    }
 }
 
 /// Consume or update a prevention shield on either an object or the game-state registry.
@@ -2579,13 +2596,99 @@ fn untap_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -
     matches!(event, ProposedEvent::Untap { .. })
 }
 
+// CR 614.1a + CR 614.6: An untap-step replacement ("If [perm] would untap
+// during [...] untap step, [effect] instead") replaces the untap with its
+// alternative effect, bound to the permanent that would have untapped ("it").
+// With no alternative effect it is a pure prevention ("doesn't untap"). Either
+// way the original untap does not happen, so the applier returns `Prevented`.
 fn untap_applier(
     event: ProposedEvent,
-    _rid: ReplacementId,
-    _state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
+    rid: ReplacementId,
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    ApplyResult::Modified(event)
+    let ProposedEvent::Untap { object_id, applied } = event else {
+        return ApplyResult::Modified(event);
+    };
+
+    let Some(source) = state.objects.get(&rid.source) else {
+        return ApplyResult::Modified(ProposedEvent::Untap { object_id, applied });
+    };
+    let controller = source.controller;
+    let execute = source
+        .replacement_definitions
+        .get(rid.index)
+        .and_then(|def| def.execute.clone());
+
+    // Run the alternative effect chain (if any) against the would-be-untapped
+    // permanent, then prevent the untap. A replacement with no execute is a
+    // bare "doesn't untap" prevention.
+    if let Some(execute) = execute {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::types::ability::TargetRef;
+
+        // CR 614.6: the alternative effect ("put two +1/+1 counters on it",
+        // "remove all wind counters from it") refers to the permanent that would
+        // have untapped — NOT the replacement source. Resolve the chain with the
+        // would-be-untapped object as the source so its `it`/SelfRef anaphor
+        // binds to that permanent, and seed `targets` for the `None`-anaphor form.
+        let mut current = Some(execute.as_ref());
+        while let Some(def) = current {
+            let mut ability = build_resolved_from_def(def, object_id, controller);
+            ability.targets = vec![TargetRef::Object(object_id)];
+            let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
+            current = def.sub_ability.as_deref();
+        }
+    }
+
+    ApplyResult::Prevented
+}
+
+// --- 13. TurnFaceUp ---
+
+fn turn_face_up_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::TurnFaceUp { .. })
+}
+
+// CR 614.1e + CR 708.11: "As ~ is turned face up, [effect]"
+// applies its alternative action AS the permanent is turned face up. Unlike a
+// prevention the turn-up still happens, so the applier performs the replacement's
+// actions (bound to the permanent being turned up) and returns the event
+// unchanged. The effect's `it`/SelfRef anaphor binds to that permanent.
+fn turn_face_up_applier(
+    event: ProposedEvent,
+    rid: ReplacementId,
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    let ProposedEvent::TurnFaceUp { object_id, applied } = event else {
+        return ApplyResult::Modified(event);
+    };
+
+    let Some(source) = state.objects.get(&rid.source) else {
+        return ApplyResult::Modified(ProposedEvent::TurnFaceUp { object_id, applied });
+    };
+    let controller = source.controller;
+    let execute = source
+        .replacement_definitions
+        .get(rid.index)
+        .and_then(|def| def.execute.clone());
+
+    if let Some(execute) = execute {
+        // Bind only the anaphoric self-reference: the execute is resolved with the
+        // turned-up permanent as its `source_id`, so "it"/`SelfRef` references the
+        // permanent ("put five +1/+1 counters on it"). The permanent is NOT stuffed
+        // into ordinary target slots — effects with their own host/target (e.g.
+        // Gift of Doom's `Effect::Attach` "attach it to a creature") must resolve
+        // that target/host themselves rather than consuming the permanent as the
+        // host. `resolve_ability_chain` walks the typed `sub_ability` chain itself,
+        // so the root execute is resolved exactly once — iterating the chain here
+        // too would run each sub-ability a second time.
+        let ability = build_resolved_from_def(execute.as_ref(), object_id, controller);
+        let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
+    }
+
+    ApplyResult::Modified(ProposedEvent::TurnFaceUp { object_id, applied })
 }
 
 // --- 14. Counter (spell countering) ---
@@ -2731,21 +2834,6 @@ fn pay_life_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState
 }
 
 fn pay_life_applier(
-    event: ProposedEvent,
-    _rid: ReplacementId,
-    _state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
-) -> ApplyResult {
-    ApplyResult::Modified(event)
-}
-
-// --- Placeholder handlers (no ProposedEvent variant yet) ---
-
-fn placeholder_matcher(_event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
-    false
-}
-
-fn placeholder_applier(
     event: ProposedEvent,
     _rid: ReplacementId,
     _state: &mut GameState,
@@ -2980,11 +3068,13 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
             applier: produce_mana_applier,
         },
     );
-    let placeholder = || ReplacementHandlerEntry {
-        matcher: placeholder_matcher,
-        applier: placeholder_applier,
-    };
-    registry.insert(ReplacementEvent::TurnFaceUp, placeholder());
+    registry.insert(
+        ReplacementEvent::TurnFaceUp,
+        ReplacementHandlerEntry {
+            matcher: turn_face_up_matcher,
+            applier: turn_face_up_applier,
+        },
+    );
 
     // CR 614.1b + CR 614.10: BeginTurn skip replacements (Stranglehold, etc.)
     registry.insert(
@@ -3552,6 +3642,14 @@ fn evaluate_replacement_condition(
             }
             _ => false,
         },
+        // CR 502.3 + CR 502.4: untap-step gate. Permanents untap as a turn-based
+        // action during the untap step, and no player receives priority then, so
+        // any `ProposedEvent::Untap` raised while `phase == Untap` is the
+        // turn-based untap (effect-untaps like "untap target creature" occur in
+        // phases that grant priority). Restricts the replacement to the untap
+        // step exactly as the "during [its controller's / your] untap step"
+        // wording requires.
+        ReplacementCondition::DuringUntapStep => state.phase == crate::types::phase::Phase::Untap,
         // CR 614.1d: "if you control [N or more] [filter]" — replacement applies only
         // while the controller has at least `minimum` permanents matching `filter` on
         // the battlefield. minimum=1 covers the singular "a [type]" form (Worship);
@@ -4763,7 +4861,7 @@ fn apply_single_replacement(
     // the same resolution step, right after the ZoneChange completes. Without this,
     // the chooser would never be prompted. Optional replacements set
     // `post_replacement_continuation` in `continue_replacement` when the player accepts.
-    let (event_key, modifiers, mandatory_post_effect) = match repl_def_ref {
+    let (event_key, modifiers, mandatory_post_effect, consume_on_apply) = match repl_def_ref {
         Some(repl_def) => {
             let ability = match branch {
                 ReplacementBranch::Execute => repl_def.execute.as_deref(),
@@ -4872,7 +4970,12 @@ fn apply_single_replacement(
             // imperative `Effect::ChangeZone.enters_under` slot. Surface it as an
             // event modifier so it is written onto the `ZoneChange` below.
             modifiers.controller_override = repl_def.enters_under.clone();
-            (repl_def.event.clone(), modifiers, post_effect)
+            (
+                repl_def.event.clone(),
+                modifiers,
+                post_effect,
+                repl_def.consume_on_apply,
+            )
         }
         None => return Ok(proposed),
     };
@@ -4937,6 +5040,9 @@ fn apply_single_replacement(
                         _ => {}
                     }
                 }
+                if consume_on_apply {
+                    mark_replacement_consumed(state, rid);
+                }
                 // CR 614.12a: Stash the mandatory execute ability as a post-replacement
                 // effect when it has work beyond the event modifiers (e.g., a Choose
                 // prompt for Siege protector / Tribute opponent selection). Runs after
@@ -4956,6 +5062,9 @@ fn apply_single_replacement(
                 return Ok(new_event);
             }
             ApplyResult::Prevented => {
+                if consume_on_apply {
+                    mark_replacement_consumed(state, rid);
+                }
                 // CR 615.5: A prevention effect's additional effect (e.g.
                 // Phyrexian Hydra's "Put a -1/-1 counter on ~ for each 1 damage
                 // prevented this way") is stashed as a post-replacement effect
@@ -5086,8 +5195,14 @@ enum CommuteClass {
     Multiplicative,
     Additive,
     Subtractive,
-    /// Two `SetTapState::Untap` replacements commute (same outcome).
-    EnterUntap,
+    /// Two replacements that set the same enter tap-state commute: the
+    /// permanent enters with that state regardless of which is applied
+    /// first, so the CR 616.1e/f ordering choice is immaterial. Keyed by
+    /// the value written (not the direction) so that same-direction writes
+    /// commute while opposite-direction writes (tap vs untap, where
+    /// last-applied wins) stay `NonCommuting`.
+    EnterTapped,
+    EnterUntapped,
 }
 
 impl CommuteClass {
@@ -5272,20 +5387,25 @@ fn candidate_materiality(
             }
             // CR 616.1c: copy-as-it-enters strips another replacement's source.
             Effect::BecomeCopy { .. } => return CandidateMateriality::Unconditional,
-            // CR 614.1c: single-target `Tap`/`Untap` (legacy `Tap`/`Untap`) both
-            // overwrite the `enter_tapped` field — two such candidates conflict
-            // (tapland + Spelunking / Archelos), last-applied wins. The mass
-            // scope is not an ETB modifier and is not matched here.
+            // CR 614.1c: single-target `Tap`/`Untap` both overwrite the
+            // `enter_tapped` field. CR 616.1e/f: ordering only matters when the
+            // candidates would leave the permanent in *different* states.
+            // Same-direction writes (two "enters tapped", or two "enters
+            // untapped") are idempotent — the permanent enters with that state
+            // regardless of order, so the choice is immaterial and no prompt is
+            // shown. Opposite-direction writes (tapland + Spelunking / Archelos)
+            // are last-applied-wins and stay `NonCommuting`. The mass scope is
+            // not an ETB modifier and is not matched here.
             Effect::SetTapState {
                 scope: EffectScope::Single,
                 state,
                 ..
             } => {
                 field = Some(EventField::EnterTapped);
-                // CR 616.1f: Duplicate untap state replacements commute (#1340).
+                // Keyed by the value written so opposite directions don't commute.
                 enter_tapped_commute = Some(match state {
-                    TapStateChange::Tap => CommuteClass::NonCommuting,
-                    TapStateChange::Untap => CommuteClass::EnterUntap,
+                    TapStateChange::Tap => CommuteClass::EnterTapped,
+                    TapStateChange::Untap => CommuteClass::EnterUntapped,
                 });
             }
             // ETB-counter replacements (`PutCounter`) only *append* to
@@ -5733,12 +5853,13 @@ mod tests {
     use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, Effect, FilterProp,
-        OriginConstraint, QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition,
-        ReplacementMode, ReplacementPlayerScope, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, CastManaObjectScope, CastManaSpentMetric,
+        ChosenAttribute, ControllerRef, Effect, FilterProp, OriginConstraint, QuantityExpr,
+        QuantityModification, QuantityRef, ReplacementDefinition, ReplacementMode,
+        ReplacementPlayerScope, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::game_state::DamageRecord;
+    use crate::types::game_state::{DamageRecord, ManaSpentSourceSnapshot};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
@@ -6313,6 +6434,99 @@ mod tests {
         assert!(
             matches!(result, ReplacementResult::Execute(_)),
             "identical untap replacements must auto-apply without ordering prompt, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn two_identical_tap_replacements_auto_apply_without_choice() {
+        // CR 616.1e/f: Two "enters tapped" replacements (Kismet + Frozen Aether)
+        // are idempotent — the permanent enters tapped regardless of order, so
+        // the ordering choice is immaterial and no prompt is shown. This is the
+        // symmetric counterpart of the untap case (#1340): materiality keys on
+        // the value written, not the tap-direction.
+        let tap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+            ))
+            .destination_zone(Zone::Battlefield);
+        let mut state = test_state_with_object(
+            ObjectId(1),
+            Zone::Battlefield,
+            vec![tap_repl.clone(), tap_repl],
+        );
+        let perm_id = ObjectId(10);
+        state.objects.insert(
+            perm_id,
+            GameObject::new(
+                perm_id,
+                CardId(2),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Hand,
+            ),
+        );
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::zone_change(perm_id, Zone::Hand, Zone::Battlefield, None);
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::Execute(_)),
+            "identical tap replacements must auto-apply without ordering prompt, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn opposite_tap_state_replacements_prompt_for_order() {
+        // CR 616.1e/f: One "enters tapped" + one "enters untapped" replacement
+        // leave the permanent in *different* states depending on which is applied
+        // last, so the ordering is material and the controller must choose
+        // (tapland + Spelunking / Archelos). Guards against over-commuting the
+        // value-keyed classes.
+        let tap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+            ))
+            .destination_zone(Zone::Battlefield);
+        let untap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                },
+            ))
+            .destination_zone(Zone::Battlefield);
+        let mut state =
+            test_state_with_object(ObjectId(1), Zone::Battlefield, vec![tap_repl, untap_repl]);
+        let perm_id = ObjectId(10);
+        state.objects.insert(
+            perm_id,
+            GameObject::new(
+                perm_id,
+                CardId(2),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Hand,
+            ),
+        );
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::zone_change(perm_id, Zone::Hand, Zone::Battlefield, None);
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::NeedsChoice(_)),
+            "opposite tap-state replacements must prompt for order, got {result:?}"
         );
     }
 
@@ -8780,6 +8994,26 @@ mod tests {
         ReplacementDefinition::new(ReplacementEvent::DamageDone).damage_modification(modification)
     }
 
+    #[test]
+    fn consume_on_apply_prevention_is_consumed_when_damage_fully_prevented() {
+        // CR 614.5 + CR 615.1a: A one-shot replacement that fully prevents damage
+        // still successfully applied, so the live replacement must be consumed.
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::All);
+        repl.consume_on_apply = true;
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let mut events = Vec::new();
+
+        let result = replace_event(&mut state, damage_event(3), &mut events);
+
+        assert!(matches!(result, ReplacementResult::Prevented));
+        let obj = state.objects.get(&ObjectId(10)).unwrap();
+        assert!(
+            obj.replacement_definitions[0].is_consumed,
+            "consume_on_apply replacement should be consumed after full prevention"
+        );
+    }
+
     fn test_state_with_damage_repl(
         obj_id: ObjectId,
         controller: PlayerId,
@@ -10519,6 +10753,94 @@ mod tests {
                     enter_with_counters,
                     vec![(CounterType::Plus1Plus1, 3u32)],
                     "expected 3 P1P1 counters (3 distinct colors spent)"
+                );
+            }
+            other => panic!("expected Execute(ZoneChange), got {:?}", other),
+        }
+    }
+
+    /// CR 614.1c + CR 601.2h: Coin of Mastery — artifact-source mana spent to
+    /// cast the entering creature resolves via payment-time source snapshots on
+    /// the spell object, not the static replacement source.
+    #[test]
+    fn artifact_mana_spent_on_self_resolves_against_entering_object() {
+        let coin_id = ObjectId(10);
+        let creature_id = ObjectId(20);
+        let treasure_id = ObjectId(30);
+
+        let etb_counter_ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::SelfObject,
+                        metric: CastManaSpentMetric::FromSource {
+                            source_filter: TargetFilter::Typed(TypedFilter::new(
+                                TypeFilter::Artifact,
+                            )),
+                        },
+                    },
+                },
+            },
+        );
+
+        let creature_filter =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+
+        let repl = ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .execute(etb_counter_ability)
+            .valid_card(creature_filter)
+            .destination_zone(Zone::Battlefield);
+
+        let mut state = test_state_with_object(coin_id, Zone::Battlefield, vec![repl]);
+
+        let mut treasure = GameObject::new(
+            treasure_id,
+            CardId(98),
+            PlayerId(0),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        treasure.card_types.core_types.push(CoreType::Artifact);
+        treasure.card_types.subtypes.push("Treasure".to_string());
+        state.objects.insert(treasure_id, treasure);
+
+        let mut spell = GameObject::new(
+            creature_id,
+            CardId(99),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Stack,
+        );
+        spell.card_types.core_types.push(CoreType::Creature);
+        spell.mana_spent_source_snapshots = vec![
+            ManaSpentSourceSnapshot {
+                source_id: treasure_id,
+                lki: state.objects[&treasure_id].snapshot_for_mana_spent(),
+            },
+            ManaSpentSourceSnapshot {
+                source_id: treasure_id,
+                lki: state.objects[&treasure_id].snapshot_for_mana_spent(),
+            },
+        ];
+        state.objects.insert(creature_id, spell);
+
+        let mut events = Vec::new();
+        let proposed =
+            ProposedEvent::zone_change(creature_id, Zone::Stack, Zone::Battlefield, None);
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        match result {
+            ReplacementResult::Execute(ProposedEvent::ZoneChange {
+                enter_with_counters,
+                ..
+            }) => {
+                assert_eq!(
+                    enter_with_counters,
+                    vec![(CounterType::Plus1Plus1, 2u32)],
+                    "expected 2 P1P1 counters (2 artifact-source mana units spent)"
                 );
             }
             other => panic!("expected Execute(ZoneChange), got {:?}", other),
