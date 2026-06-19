@@ -397,6 +397,7 @@ mod timely_ward_regression;
 mod tinybones_joins_up_multi_target;
 mod tombstone_stairwell_per_player_tokens;
 mod treasured_find_regression;
+mod true_conviction_double_keyword_grant;
 mod turn_control_priority_softlock;
 mod twice_instead_repeat_for;
 mod tyvar_activate_as_though_haste;
