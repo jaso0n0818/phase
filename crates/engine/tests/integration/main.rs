@@ -275,6 +275,7 @@ mod issue_3325_umbral_mantle;
 mod issue_3425_legend_rule_exemption_scopes;
 mod issue_3660_paradigm_multiple_offers;
 mod issue_3665_smugglers_share;
+mod issue_3681_inferno_titan_divided_damage;
 mod issue_536_six_grants_retrace;
 mod issue_541_endurance_graveyard_to_bottom;
 mod issue_544_krark_clan_ironworks_auto_pass;
