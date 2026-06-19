@@ -407,6 +407,7 @@ mod urge_to_feed_regression;
 mod urza_lord_high_artificer_shuffle_exile_free_cast;
 mod urzas_saga_chapter_two;
 mod urzas_tower_conditional_mana;
+mod veteran_armorsmith_soldier_anthem;
 mod vigor_regression;
 mod virulent_emissary_trigger;
 mod volatile_fault_that_player_search;
