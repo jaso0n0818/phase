@@ -395,6 +395,7 @@ mod the_ur_dragon_eminence;
 mod thoughtweft_trample_regression;
 mod timely_ward_regression;
 mod tinybones_joins_up_multi_target;
+mod tobita_master_of_winds_flying_grant;
 mod tombstone_stairwell_per_player_tokens;
 mod treasured_find_regression;
 mod turn_control_priority_softlock;
