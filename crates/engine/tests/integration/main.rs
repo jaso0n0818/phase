@@ -419,4 +419,5 @@ mod wise_mothman_milled_trigger;
 mod wise_mothman_target_distinctness;
 mod wrenn_and_six_up_to_one_optout;
 mod yare_extra_blockers;
+mod yavimaya_enchantress_dynamic_pump;
 mod yuriko_combat_damage;
