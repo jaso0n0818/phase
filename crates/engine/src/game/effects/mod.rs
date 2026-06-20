@@ -5196,8 +5196,10 @@ fn resolve_chain_body(
                 // the ability source's OWN printed mana cost at resolution time. The
                 // cost is dynamic because the granting Aura can be attached to any
                 // permanent (Pendrell Flux, Disruption Aura). An absent source or a
-                // costless source resolves to no cost, which the CR 118.5 zero-cost
-                // short-circuit below treats as "always payable".
+                // costless source (land, token, other permanent with no mana cost)
+                // resolves to `ManaCost::NoCost`, which CR 118.6 / CR 202.1b define
+                // as an UNPAYABLE cost; the dedicated unpayable branch below handles
+                // it (kept distinct from the `{0}` "always payable" short-circuit).
                 AbilityCost::Mana {
                     cost: ManaCost::SelfManaCost,
                 } => {
@@ -5221,7 +5223,17 @@ fn resolve_chain_body(
             //     effect anyway (no opt-out offered).
             // The fold preserves both behaviors verbatim to keep this batch
             // strictly architectural; harmonizing them is tracked separately.
-            if matches!(&resolved_cost, AbilityCost::Mana { cost } if *cost == ManaCost::zero()) {
+            // CR 118.6 + CR 202.1b: A cost based on the mana cost of an object
+            // that has no mana cost (lands, tokens, other costless permanents)
+            // is UNPAYABLE — attempting to pay it is an illegal action. No
+            // payment is offered and the unless-effect always resolves; even a
+            // Counter is not prevented (its controller cannot pay). This is the
+            // inverse of the `{0}` "players can always pay 0" branch below, and
+            // the two must stay distinct: `ManaCost::NoCost != ManaCost::zero()`.
+            if matches!(&resolved_cost, AbilityCost::Mana { cost } if *cost == ManaCost::NoCost) {
+                // Unpayable: fall through to execute the effect unconditionally.
+            } else if matches!(&resolved_cost, AbilityCost::Mana { cost } if *cost == ManaCost::zero())
+            {
                 if matches!(ability.effect, Effect::Counter { .. }) {
                     // Counter is prevented — spell survives.
                     events.push(GameEvent::EffectResolved {

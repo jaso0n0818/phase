@@ -96,3 +96,48 @@ fn declining_own_mana_cost_upkeep_tax_sacrifices_the_source() {
         "declining the own-mana-cost upkeep tax must sacrifice the source"
     );
 }
+
+#[test]
+fn costless_source_upkeep_tax_is_unpayable_and_sacrificed() {
+    // CR 118.6 + CR 202.1b: an object with no mana cost (token, land, or any
+    // other costless permanent) creates an UNPAYABLE cost for "pay its mana
+    // cost". The punishment must fire unconditionally — the player is never
+    // offered a payment prompt (attempting to pay an unpayable cost is an
+    // illegal action), so a costless permanent cannot dodge the sacrifice.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Upkeep);
+
+    // A 2/2 with NO printed mana cost (as a token would have). SelfManaCost
+    // resolves to ManaCost::NoCost, which must route to the unpayable branch —
+    // NOT the {0} "always payable" short-circuit that would let it survive.
+    let creature = scenario
+        .add_creature_from_oracle(P0, "Test Upkeep Tax", 2, 2, UPKEEP_OWN_COST)
+        .with_mana_cost(ManaCost::NoCost)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P0;
+    process_triggers(
+        runner.state_mut(),
+        &[GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        }],
+    );
+    runner.advance_until_stack_empty();
+
+    // CR 118.6 discriminator: no payment prompt is offered for an unpayable
+    // cost. If NoCost had wrongly been treated as {0}/payable, the player would
+    // get an UnlessPayment prompt and could keep the creature.
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }),
+        "a costless source's unpayable upkeep tax must NOT offer a payment prompt, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // The punishment resolves unconditionally: the costless source is sacrificed.
+    assert_eq!(
+        runner.state().objects[&creature].zone,
+        Zone::Graveyard,
+        "an unpayable own-mana-cost upkeep tax must sacrifice the costless source"
+    );
+}
