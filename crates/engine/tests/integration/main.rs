@@ -258,6 +258,7 @@ mod issue_3263_gitaxian_probe;
 mod issue_3264_jace_mind_sculptor_minus_twelve;
 mod issue_3265_knowledge_seeker_kwain;
 mod issue_3267_sanwell_rest_on_bottom;
+mod issue_3268_nahiri_lithomancer;
 mod issue_3274_elder_deep_fiend;
 mod issue_3282_consign_to_memory_counter;
 mod issue_3283_sevinne_reclamation_copy_no_self_copy;
