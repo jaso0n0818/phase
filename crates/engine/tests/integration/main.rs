@@ -388,6 +388,7 @@ mod power_fist_combat_damage_regression;
 mod primo_unbounded_fractal_counters;
 mod proliferate_zero_counter;
 mod quirion_ranger_activation;
+mod rage_reflection_double_strike_grant;
 mod refurbished_familiar;
 mod riot_control_regression;
 mod ripples_of_undeath_regression;
