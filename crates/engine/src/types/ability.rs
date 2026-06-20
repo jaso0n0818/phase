@@ -8158,17 +8158,32 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
-    /// CR 701.10a: Double power/toughness of target creature.
+    /// CR 701.10a + CR 613.4c: Multiply power/toughness of target creature by
+    /// `factor` via a layer-7c continuous modification. `factor: 2` is "double"
+    /// (CR 701.10a/b); `factor: 3` is "triple" (Tifa's Limit Break — Final
+    /// Heaven). Higher factors compose the same way: each adds `(factor-1)x` the
+    /// snapshot value (CR 701.10b templating generalized — "double" gives +X,
+    /// "triple" gives +2X). The `factor` axis parameterizes the multiplier so
+    /// "double"/"triple"/… share one P/T-modifying effect rather than a
+    /// Double/Triple sibling cluster.
     DoublePT {
         mode: DoublePTMode,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// Multiplier applied to the snapshot P/T. Defaults to 2 ("double") for
+        /// forward compatibility with hand-authored fixtures and pre-`factor`
+        /// serialized card data.
+        #[serde(default = "default_pt_factor")]
+        factor: u32,
     },
-    /// CR 701.10a: Double power/toughness of all matching creatures.
+    /// CR 701.10a + CR 613.4c: Multiply power/toughness of all matching creatures
+    /// by `factor` (see `DoublePT` for the `factor` semantics).
     DoublePTAll {
         mode: DoublePTMode,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        #[serde(default = "default_pt_factor")]
+        factor: u32,
     },
     /// CR 122.5 + CR 122.8: Transfer counters from source onto target.
     /// `mode` records whether Oracle says to move counters (remove then put)
@@ -8574,6 +8589,19 @@ pub enum Effect {
     /// target creature. Idempotent: if not prepared, no event fires. Assign
     /// when WotC publishes SOS CR update.
     BecomeUnprepared {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
+    /// CR 702.171b: the target permanent becomes saddled until end of turn.
+    /// Distinct from the Saddle keyword's activated ability (CR 702.171a,
+    /// `KeywordAction::Saddle`) which is paid by tapping creatures: this is the
+    /// effect-level designation toggle used by "becomes saddled" instructions
+    /// (Guidelight Matrix, Kolodin, Alacrian Armory) that grant the designation
+    /// without paying the saddle cost. Idempotent: if already saddled, no event
+    /// fires. CR 702.171b: only permanents can become saddled, the designation
+    /// is cleared at end of turn / when the permanent leaves the battlefield,
+    /// and it is not part of the permanent's copiable values.
+    BecomeSaddled {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
@@ -9663,6 +9691,14 @@ fn default_one() -> u32 {
     1
 }
 
+/// CR 701.10a: A bare "double power/toughness" effect multiplies by 2. Used as
+/// the `serde` default for `Effect::DoublePT`/`DoublePTAll` `factor` so existing
+/// serialized card data (no `factor` key) and hand-authored fixtures keep the
+/// historical doubling behavior.
+fn default_pt_factor() -> u32 {
+    2
+}
+
 /// Deserialize a `TapCreaturesRequirement`, accepting both the current tagged
 /// map form (`{"requirement":"count","count":N}` /
 /// `{"requirement":"aggregate","stat":"TotalPower","comparator":"GE","value":N}`)
@@ -10430,6 +10466,7 @@ impl Effect {
             | Effect::ForceAttack { target, .. }
             | Effect::BecomePrepared { target, .. }
             | Effect::BecomeUnprepared { target, .. }
+            | Effect::BecomeSaddled { target, .. }
             | Effect::CastFromZone { target, .. }
             | Effect::PreventDamage { target, .. }
             | Effect::Exploit { target, .. }
@@ -10884,6 +10921,7 @@ impl Effect {
             | Effect::ForceAttack { .. }
             | Effect::BecomePrepared { .. }
             | Effect::BecomeUnprepared { .. }
+            | Effect::BecomeSaddled { .. }
             | Effect::CastFromZone { .. }
             | Effect::PreventDamage { .. }
             | Effect::Exploit { .. }
@@ -11093,6 +11131,7 @@ impl Effect {
             | Effect::ForceAttack { .. }
             | Effect::BecomePrepared { .. }
             | Effect::BecomeUnprepared { .. }
+            | Effect::BecomeSaddled { .. }
             | Effect::CastFromZone { .. }
             | Effect::PreventDamage { .. }
             | Effect::Exploit { .. }
@@ -11277,6 +11316,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::SolveCase => "SolveCase",
         Effect::BecomePrepared { .. } => "BecomePrepared",
         Effect::BecomeUnprepared { .. } => "BecomeUnprepared",
+        Effect::BecomeSaddled { .. } => "BecomeSaddled",
         Effect::SetClassLevel { .. } => "SetClassLevel",
         Effect::CreateDelayedTrigger { .. } => "CreateDelayedTrigger",
         Effect::AddTargetReplacement { .. } => "AddTargetReplacement",
@@ -11483,6 +11523,8 @@ pub enum EffectKind {
     BecomePrepared,
     /// CR 702.xxx: Prepare (Strixhaven) — clear prepared state on target.
     BecomeUnprepared,
+    /// CR 702.171b: mark the target permanent as saddled until end of turn.
+    BecomeSaddled,
     SetClassLevel,
     CreateDelayedTrigger,
     AddTargetReplacement,
@@ -11700,6 +11742,7 @@ impl From<&Effect> for EffectKind {
             Effect::SolveCase => EffectKind::SolveCase,
             Effect::BecomePrepared { .. } => EffectKind::BecomePrepared,
             Effect::BecomeUnprepared { .. } => EffectKind::BecomeUnprepared,
+            Effect::BecomeSaddled { .. } => EffectKind::BecomeSaddled,
             Effect::SetClassLevel { .. } => EffectKind::SetClassLevel,
             Effect::CreateDelayedTrigger { .. } => EffectKind::CreateDelayedTrigger,
             Effect::AddTargetReplacement { .. } => EffectKind::AddTargetReplacement,
@@ -13708,6 +13751,13 @@ pub enum TriggerCondition {
     /// [source filter] dies" — death trigger gated on the dying creature having been
     /// dealt damage this turn by a source matching the filter (e.g. Shelob's Spider gate).
     DealtDamageThisTurnBySource { source: TargetFilter },
+
+    /// CR 701.26 + CR 603.4: True iff the triggering object (the permanent that
+    /// became tapped) has become tapped exactly once so far this turn — i.e. this
+    /// is the first time. Read from `GameState.object_tap_count_this_turn` against
+    /// the tapped object's id. Per CR 603.4 it is checked at both trigger time and
+    /// resolution; the count model lets the resolution-time re-check stay correct.
+    FirstTimeObjectTappedThisTurn,
 
     /// CR 400.7 + CR 603.10: "if it was a [type]" — true when the trigger source's
     /// last known information includes the specified core type. Used by the Glimmer cycle
