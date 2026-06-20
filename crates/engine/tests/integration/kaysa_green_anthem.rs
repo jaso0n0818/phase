@@ -83,7 +83,7 @@ fn kaysa_buffs_green_creatures_you_control_including_self() {
         "another green creature you control gets +1/+1: 1/1 → 2/2"
     );
 
-    // CR 105.2 / CR 205.3: a non-green creature is outside the color filter.
+    // CR 105.2: a non-green creature is outside the color filter.
     assert_eq!(
         effective_pt(&mut runner, colorless_ally),
         (0, 2),
