@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
-use nom::character::complete::{multispace0, multispace1};
+use nom::character::complete::multispace1;
 use nom::combinator::{all_consuming, eof, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -326,20 +326,14 @@ pub(super) fn parse_choice_partition_destination(
     .parse(input)
 }
 
-fn append_definition_to_sub_chain(ability: &mut AbilityDefinition, next: AbilityDefinition) {
+fn append_definition_to_sub_chain(ability: &mut AbilityDefinition, mut next: AbilityDefinition) {
     let mut cursor = ability;
     loop {
         if cursor.sub_ability.is_none() {
             if cursor.optional
-                && matches!(*cursor.effect, Effect::CastFromZone { .. })
-                && matches!(
-                    *next.effect,
-                    Effect::PutAtLibraryPosition {
-                        target: TargetFilter::ExiledBySource,
-                        ..
-                    }
-                )
+                && super::lower::is_linked_exile_cast_bottom_cleanup(&cursor.effect, &next.effect)
             {
+                super::lower::normalize_linked_exile_cast_bottom_cleanup(&mut next.effect);
                 cursor.else_ability = Some(Box::new(next.clone()));
             }
             cursor.sub_ability = Some(Box::new(next));
@@ -849,6 +843,9 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             // single-clause path.
                             if let Some(prepend) =
                                 combat_requirement_conjunct_prepend(before_and, remainder_trimmed)
+                                    .or_else(|| {
+                                        exile_conjunct_prepend(&before_lower, remainder_trimmed)
+                                    })
                             {
                                 push_clause_chunk(
                                     &mut chunks,
@@ -1037,6 +1034,15 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         return None;
     }
 
+    // CR 613.4b + CR 611.2a: the no-"and" sibling form ", has base power and
+    // toughness N/N" (e.g. the middle conjunct of "becomes a Spirit, has base
+    // power and toughness 1/1, and gains ...") is a layer-7b continuous
+    // modification, not an independent clause — keep it attached so
+    // parse_continuous_modifications emits SetPower/SetToughness rather than
+    // orphaning it as Unimplemented. Mirrors the bare-"and" guard below.
+    if starts_have_base_power_toughness(trimmed) {
+        return None;
+    }
     if starts_clause_text_or_conjugated(trimmed) || starts_with_damage_clause(&trimmed_lower) {
         return Some((ClauseBoundary::Comma, whitespace_len));
     }
@@ -1049,6 +1055,13 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         if current_ends_with_damage_recipient(&current_lower)
             && starts_with_damage_amount_continuation(after_and)
         {
+            return None;
+        }
+        // CR 613.1d + CR 613.4b: comma-list continuous modifiers such as
+        // "loses all abilities, becomes a Coward ..., and has base power and
+        // toughness 1/1" keep the base-P/T conjunct attached to the same
+        // subject. It is a layer-7b modification, not an independent clause.
+        if starts_have_base_power_toughness(after_and) {
             return None;
         }
         if starts_clause_text_or_conjugated(after_and) || starts_with_damage_clause(after_and) {
@@ -1867,6 +1880,56 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
 /// distribution, e.g. Gogo's "~ and that creature each get +2/+0 and gain haste
 /// ... and attack this turn if able"), there is no subject to thread — return
 /// `Some("")` so the conjunct splits with no prepend.
+/// CR 701.13 + CR 608.2c: verb-gapping in a conjoined exile cost — "exile a
+/// Human you control **and** an artifact you control" elides the second
+/// "exile". The two conjuncts name *distinct* objects (a Human and an artifact),
+/// so they lower to two separate `ChangeZone(Exile)` effects, not one `And`
+/// filter. The bare-`and` recognizer never matches a noun-phrase continuation
+/// (correctly — it must not over-split "target creature and all other
+/// creatures"), so we restore the elided verb here: when conjunct 1 begins with
+/// `"exile "` and conjunct 2 is a bare article-led object phrase, return
+/// `"exile "` to prepend so the second conjunct reaches the exile parser as its
+/// own clause (Fugitive of the Judoon III).
+///
+/// Tightly gated so it never fires on a genuine single-object continuation: the
+/// remainder must be `a/an <phrase>` AND must parse to a concrete typed filter
+/// with no unparsed remainder (other than an optional possessive tail).
+fn exile_conjunct_prepend(before_lower: &str, remainder_trimmed: &str) -> Option<String> {
+    // Conjunct 1 must contain the elided exile verb (the chunk may begin with an
+    // optional "you may " frame: "You may exile a Human you control and …").
+    if !nom_primitives::scan_contains(before_lower, "exile ") {
+        return None;
+    }
+    let remainder_lower = remainder_trimmed.to_ascii_lowercase();
+    // Conjunct 2 must be an article-led noun phrase (never a verb-headed clause —
+    // those are already handled by `starts_bare_and_clause`).
+    if alt((
+        tag::<_, _, OracleError<'_>>("a "),
+        tag::<_, _, OracleError<'_>>("an "),
+    ))
+    .parse(remainder_lower.as_str())
+    .is_err()
+    {
+        return None;
+    }
+    // Isolate the object phrase: it ends at the first sentence/clause boundary
+    // (". If you do, …" continuation, or a comma). Bounding the slice prevents
+    // the trailing continuation from defeating the "no stray remainder" check.
+    // allow-noncombinator: structural clause-boundary scan (locate the sentence/comma terminator), not parsing dispatch.
+    let phrase_end = remainder_trimmed
+        .find(['.', ','])
+        .unwrap_or(remainder_trimmed.len());
+    let phrase = remainder_trimmed[..phrase_end].trim();
+    // The phrase must parse to a concrete typed object filter with no stray
+    // remainder — this rejects open-ended continuations ("... and an opponent
+    // gains control of it") and incomplete noun phrases.
+    let (filter, rem) = parse_target(phrase);
+    if !rem.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    Some("exile ".to_string())
+}
+
 fn combat_requirement_conjunct_prepend(
     before_and: &str,
     remainder_trimmed: &str,
@@ -2108,8 +2171,24 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
     .is_ok()
 }
 
-/// CR 707.10c: nom recognizer for the "[you] may choose [a] new target[s] for
+/// CR 707.10c: nom parser for the "[you] may choose [a] new target[s] for
 /// {the,that} copy/copies" continuation clause that grants copy retargeting.
+pub(super) fn parse_copy_retarget_clause(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            opt(alt((tag(", and "), tag("and ")))),
+            opt(tag("you ")),
+            tag("may choose "),
+            alt((tag("a new target "), tag("new targets "))),
+            tag("for "),
+            alt((tag("the copies"), tag("the copy"), tag("that copy"))),
+            opt(alt((tag("."), tag(",")))),
+        ),
+    )
+    .parse(input)
+}
+
 /// Operates on lowercased text; tolerates a trailing period/whitespace.
 ///
 /// The clause is composed from independent axes rather than enumerated as full
@@ -2121,23 +2200,9 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
 ///   - determiner ("the copy/copies" — Fork/Twincast; "that copy" — the Chain
 ///     cycle's "a new target for that copy").
 pub(super) fn recognize_copy_retarget_clause(lower: &str) -> bool {
-    value(
-        (),
-        (
-            multispace0,
-            opt(alt((tag::<_, _, OracleError<'_>>(", and "), tag("and ")))),
-            opt(tag("you ")),
-            tag("may choose "),
-            alt((tag("a new target "), tag("new targets "))),
-            tag("for "),
-            alt((tag("the copies"), tag("the copy"), tag("that copy"))),
-            opt(alt((tag("."), tag(",")))),
-            multispace0,
-            eof,
-        ),
-    )
-    .parse(lower.trim())
-    .is_ok()
+    all_consuming(parse_copy_retarget_clause)
+        .parse(lower.trim())
+        .is_ok()
 }
 
 /// CR 707.10c: Set `retarget` on the (possibly delayed-trigger-wrapped)
@@ -2528,7 +2593,9 @@ pub(super) fn apply_clause_continuation(
                                     caused_by: None,
                                 },
                                 enters_under,
-                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
+                                    enter_tapped,
+                                ),
                                 enter_with_counters: vec![],
                                 face_down_profile,
                                 library_position: None,
@@ -2562,7 +2629,9 @@ pub(super) fn apply_clause_continuation(
                                 owner_library: false,
                                 enter_transformed: false,
                                 enters_under,
-                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
+                                    enter_tapped,
+                                ),
                                 enters_attacking: false,
                                 up_to: is_up_to,
                                 enter_with_counters: vec![],
@@ -2827,6 +2896,7 @@ pub(super) fn apply_clause_continuation(
             enter_tapped: tapped,
             enters_attacking: attacking,
             rest_destination: rest_dest,
+            enters_under,
             optional_decline,
         } => {
             let Some(previous) = defs.last_mut() else {
@@ -2838,6 +2908,7 @@ pub(super) fn apply_clause_continuation(
                 enters_attacking,
                 rest_destination,
                 kept_optional_to,
+                enters_under: effect_enters_under,
                 ..
             } = &mut *previous.effect
             {
@@ -2871,6 +2942,7 @@ pub(super) fn apply_clause_continuation(
                 if let Some(rest) = rest_dest {
                     *rest_destination = rest;
                 }
+                *effect_enters_under = enters_under;
             }
         }
         ContinuationAst::GrantExtraTurnAfterControlledTurn => {
@@ -3557,6 +3629,10 @@ fn parse_dig_kept_destination(lower: &str) -> (Option<Zone>, bool) {
         return parsed;
     }
 
+    if let Some(parsed) = parse_milled_this_way_destination(lower) {
+        return parsed;
+    }
+
     let destination = if nom_primitives::scan_contains(lower, "onto the battlefield") {
         Some(Zone::Battlefield)
     } else if nom_primitives::scan_contains(lower, "into your hand")
@@ -3569,6 +3645,16 @@ fn parse_dig_kept_destination(lower: &str) -> (Option<Zone>, bool) {
         None
     };
     (destination, false)
+}
+
+fn parse_milled_this_way_destination(lower: &str) -> Option<(Option<Zone>, bool)> {
+    let (tail, _) = preceded(
+        take_until::<_, _, OracleError<'_>>("milled this way"),
+        tag::<_, _, OracleError<'_>>("milled this way"),
+    )
+    .parse(lower)
+    .ok()?;
+    parse_dig_destination_tail(tail)
 }
 
 fn parse_dig_from_among_destination(lower: &str) -> Option<(Option<Zone>, bool)> {
@@ -3963,6 +4049,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Tribute { .. }
         | Effect::TimeTravel
         | Effect::BecomeMonarch
+        | Effect::NoOp
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
         | Effect::EndTheTurn
@@ -4055,6 +4142,8 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::Heist { .. }
+        | Effect::HeistExile
         | Effect::Cascade
         | Effect::Ripple { .. }
         | Effect::MiracleCast { .. }
@@ -4412,11 +4501,17 @@ pub(super) fn parse_followup_continuation_ast(
             } else {
                 None
             };
+            let enters_under = if nom_primitives::scan_contains(&lower, "under your control") {
+                Some(ControllerRef::You)
+            } else {
+                None
+            };
             Some(ContinuationAst::RevealUntilKept {
                 destination,
                 enter_tapped,
                 enters_attacking,
                 rest_destination: rest,
+                enters_under,
                 optional_decline,
             })
         }
@@ -5143,6 +5238,35 @@ mod tests {
     use super::*;
     use crate::types::ability::QuantityExpr;
 
+    // CR 701.13 + CR 608.2c: verb-gapping in a conjoined exile — "exile a Human
+    // you control and an artifact you control" splits into two clauses, the
+    // second prefixed with the elided "exile " so both objects are exiled.
+    // Building block for Fugitive of the Judoon III.
+    #[test]
+    fn conjoined_exile_restores_elided_verb() {
+        let chunks = clause_texts("exile a Human you control and an artifact you control");
+        assert_eq!(
+            chunks,
+            vec!["exile a Human you control", "exile an artifact you control"],
+            "second conjunct must regain the elided exile verb"
+        );
+    }
+
+    // Guard: the verb-gapping recognizer must NOT split a genuine single-object
+    // noun-phrase continuation that is not an exile object ("... and an opponent
+    // gains control of it" is a verb-headed clause handled elsewhere; a bare
+    // noun continuation with no exile head stays one clause).
+    #[test]
+    fn exile_conjunct_prepend_rejects_non_object_continuation() {
+        assert_eq!(
+            exile_conjunct_prepend(
+                "exile a creature you control",
+                "an opponent gains control of it"
+            ),
+            None
+        );
+    }
+
     #[test]
     fn rest_cards_reference_matches_bare_the_other() {
         // 5a: bare "the other" (cultivate) must parse.
@@ -5444,6 +5568,37 @@ mod tests {
             vec![
                 "That creature can't be blocked this turn and has base power and toughness 1/1 until end of turn"
             ]
+        );
+    }
+
+    /// CR 613.1d + CR 613.4b: Curious Colossus — a comma-separated chain with
+    /// additive type change and trailing "and has base power and toughness N/N"
+    /// must stay one continuous-modification clause so the target/affected
+    /// subject applies to every layer-4/6/7b modification.
+    #[test]
+    fn comma_and_does_not_split_type_change_and_has_base_pt() {
+        let chunks = clause_texts(
+            "each creature target opponent controls loses all abilities, becomes a Coward in addition to its other types, and has base power and toughness 1/1",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "each creature target opponent controls loses all abilities, becomes a Coward in addition to its other types, and has base power and toughness 1/1"
+            ]
+        );
+    }
+
+    /// CR 613.4b: the no-"and" sibling form ", has base power and toughness N/N"
+    /// (the middle conjunct of e.g. "becomes a Spirit, has base power and
+    /// toughness 1/1, and gains ...") must also stay attached — the bare-"and"
+    /// guard above only covers the trailing ", and has ..." form.
+    #[test]
+    fn comma_no_and_does_not_split_has_base_pt() {
+        let chunks =
+            clause_texts("target creature loses all abilities, has base power and toughness 2/2");
+        assert_eq!(
+            chunks,
+            vec!["target creature loses all abilities, has base power and toughness 2/2"]
         );
     }
 
@@ -6297,13 +6452,33 @@ mod tests {
         );
     }
 
-    /// Issue #2349 — Fertile Thicket. "reveal up to one basic land card from
-    /// among them, then put that card on top of your library and the rest on the
-    /// bottom in any order." The kept card routes to a fixed library position
-    /// (top), but the clause's verb is "reveal" (CR 701.20a, public), so
-    /// `reveal_verb` must be true. Previously `parse_dig_destination_tail` did
-    /// not recognize "on top of your library", so the kept destination resolved
-    /// to None and the clause became Unimplemented.
+    #[test]
+    fn put_all_milled_cards_onto_battlefield_tapped_patches_enter_tapped() {
+        let mill = Effect::Mill {
+            count: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+        };
+        let result = parse_followup_continuation_ast(
+            "Put all creature cards milled this way onto the battlefield tapped.",
+            &mill,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            destination,
+            enter_tapped,
+            ..
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(destination, Some(Zone::Battlefield));
+        assert!(
+            enter_tapped,
+            "enter_tapped must be true for tapped battlefield returns"
+        );
+    }
+
     #[test]
     fn fertile_thicket_reveal_basic_land_to_top_rest_on_bottom() {
         let dig = make_dig_effect();
@@ -7328,6 +7503,38 @@ mod tests {
                 .any(|e| matches!(e, Effect::Unimplemented { .. })),
             "no clause should fall back to Unimplemented, got {effects:?}"
         );
+    }
+
+    #[test]
+    fn mill_put_all_milled_cards_onto_battlefield_tapped_preserves_enter_tapped() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "Mill three cards. Put all creature cards milled this way onto the battlefield tapped.",
+            AbilityKind::Spell,
+        );
+
+        let mut chain: Vec<&Effect> = vec![];
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            chain.push(d.effect.as_ref());
+            node = d.sub_ability.as_deref();
+        }
+
+        let put = chain
+            .iter()
+            .find(|effect| matches!(***effect, Effect::ChangeZoneAll { .. }))
+            .expect("expected a ChangeZoneAll effect");
+        let put = *put;
+        match put {
+            Effect::ChangeZoneAll { enter_tapped, .. } => {
+                assert!(
+                    enter_tapped.is_tapped(),
+                    "expected milled cards to enter tapped"
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]

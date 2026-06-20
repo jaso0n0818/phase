@@ -2183,6 +2183,10 @@ impl FromStr for Keyword {
             "infect" => Ok(Keyword::Infect),
             "afflict" => Ok(Keyword::Afflict(1)),
             "frenzy" => Ok(Keyword::Frenzy(1)),
+            // CR 702.164: Toxic N — bare "toxic" (grant text / "if that creature has toxic"
+            // condition). Parameter defaults to 1; has_keyword matches by discriminant so N
+            // is irrelevant for presence. The colon form ("Toxic:N") is handled above.
+            "toxic" => Ok(Keyword::Toxic(1)),
             "prowess" => Ok(Keyword::Prowess),
             "undying" => Ok(Keyword::Undying),
             "persist" => Ok(Keyword::Persist),
@@ -2387,6 +2391,13 @@ pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
         "red" => ProtectionTarget::Color(ManaColor::Red),
         "green" => ProtectionTarget::Color(ManaColor::Green),
         "multicolored" => ProtectionTarget::Multicolored,
+        // CR 702.16a + CR 105.2a: "protection from monocolored" is a color-count
+        // quality (exactly one color), NOT a card type. Route to the runtime
+        // `source_matches_quality` arm (game/keywords.rs) which already evaluates
+        // `source.color.len() == 1`. Multicolored keeps its dedicated variant;
+        // monocolored reuses the existing Quality variant (no new variant / no game
+        // change). Mirrors parse_hexproof_filter's monocolored→Quality handling.
+        "monocolored" => ProtectionTarget::Quality("monocolored".into()),
         // CR 702.16: "the chosen color" resolves at runtime from chosen_attributes
         "the chosen color" | "chosen color" => ProtectionTarget::ChosenColor,
         // CR 702.16 + CR 205.2: "the chosen card type" resolves at
@@ -3386,6 +3397,48 @@ mod tests {
         );
     }
 
+    /// CR 702.16a + CR 105.2a: "protection from monocolored" (Guardian of the
+    /// Guildpact, Providence of Night) is a color-count quality routed to the
+    /// runtime `source_matches_quality` arm (`source.color.len() == 1`), NOT a
+    /// card type. Misrouting to `CardType("monocolored")` is inert because
+    /// `source_matches_card_type` only matches core types + subtypes, so the
+    /// grant would do nothing. This test fails if the fix is reverted.
+    #[test]
+    fn parse_protection_target_monocolored_is_quality_not_card_type() {
+        // Fix-discriminating: monocolored must be a Quality, never a CardType.
+        assert_eq!(
+            parse_protection_target("monocolored"),
+            ProtectionTarget::Quality("monocolored".to_string())
+        );
+        assert_ne!(
+            parse_protection_target("monocolored"),
+            ProtectionTarget::CardType("monocolored".to_string())
+        );
+        // End-to-end through Keyword::from_str (the parser dispatch path).
+        assert_eq!(
+            Keyword::from_str("Protection:monocolored").unwrap(),
+            Keyword::Protection(ProtectionTarget::Quality("monocolored".to_string()))
+        );
+        // No-regression: multicolored keeps its dedicated typed variant.
+        assert_eq!(
+            parse_protection_target("multicolored"),
+            ProtectionTarget::Multicolored
+        );
+        // No-regression: colors and chosen-color/card-type arms are unchanged.
+        assert_eq!(
+            parse_protection_target("red"),
+            ProtectionTarget::Color(ManaColor::Red)
+        );
+        assert_eq!(
+            parse_protection_target("the chosen color"),
+            ProtectionTarget::ChosenColor
+        );
+        assert_eq!(
+            parse_protection_target("artifacts"),
+            ProtectionTarget::CardType("artifacts".to_string())
+        );
+    }
+
     /// CR 702.16 + CR 205.2: "the chosen card type" / "chosen card
     /// type" parse to the runtime-resolved `ChosenCardType` variant. Plus the
     /// Blocker-C regression: the `Quality`/`CardType` fallthrough arms must
@@ -3704,6 +3757,22 @@ mod tests {
             assert_eq!(counter_type, &CounterType::Plus1Plus1);
             assert_eq!(*count, 3);
         }
+    }
+
+    #[test]
+    fn parse_toxic_colon_and_bare() {
+        // CR 702.164: colon-form carries N (no-regression for the existing path).
+        assert_eq!(Keyword::from_str("Toxic:3").unwrap(), Keyword::Toxic(3));
+        // CR 702.164: bare "toxic" (grant text / "if that creature has toxic"
+        // condition) defaults to Toxic(1) and must NOT fall to Unknown — otherwise
+        // has_keyword (discriminant match) never sees a real Toxic(N) and the rider
+        // is silently dead. Case-insensitive via the from_str normalizer.
+        assert_eq!(Keyword::from_str("toxic").unwrap(), Keyword::Toxic(1));
+        assert_eq!(Keyword::from_str("Toxic").unwrap(), Keyword::Toxic(1));
+        assert_ne!(
+            Keyword::from_str("toxic").unwrap(),
+            Keyword::Unknown("toxic".to_string())
+        );
     }
 
     #[test]

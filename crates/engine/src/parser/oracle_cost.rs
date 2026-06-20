@@ -11,7 +11,7 @@ use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_contains, split_once_on};
-use super::oracle_quantity::parse_for_each_clause;
+use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_target::{parse_target, parse_type_phrase};
 use super::oracle_util::parse_count_expr;
 use super::oracle_util::parse_mana_symbols;
@@ -261,6 +261,17 @@ fn parse_remove_counter_quantity_and_kind(
     {
         return Some((REMOVE_COUNTER_COST_X, counter_type));
     }
+    // CR 107.3 + CR 601.2b: "one or more" counters is a player-chosen variable
+    // count (X), announced at activation; "that much" / "counters removed this
+    // way" then scale by the chosen value.
+    if let Ok((_, counter_type)) = all_consuming(preceded(
+        tag::<_, _, E<'_>>("one or more "),
+        parse_remove_counter_kind,
+    ))
+    .parse(input)
+    {
+        return Some((REMOVE_COUNTER_COST_X, counter_type));
+    }
     if let Ok((_, (count, counter_type))) = all_consuming(pair(
         terminated(nom_primitives::parse_number, tag::<_, _, E<'_>>(" ")),
         parse_remove_counter_kind,
@@ -431,8 +442,8 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 )
                 .parse(after_n)
                 {
-                    if let Some(qty) =
-                        parse_for_each_clause(for_each_clause.trim().trim_end_matches('.'))
+                    if let Ok((_, qty)) =
+                        nom_quantity::parse_for_each_clause_ref_complete(for_each_clause)
                     {
                         return AbilityCost::PayLife {
                             amount: QuantityExpr::Multiply {
@@ -782,6 +793,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 count: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
+                reveal: true,
             }),
         };
     }
@@ -1008,7 +1020,7 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
 
     // Try parse_for_each_clause first (handles counters, player counts, etc.),
     // then fall back to parse_type_phrase for standard object count patterns.
-    if let Some(qty) = parse_for_each_clause(after_less) {
+    if let Ok((_, qty)) = nom_quantity::parse_for_each_clause_ref_complete(after_less) {
         return Some(CostReduction {
             amount_per,
             count: QuantityExpr::Ref { qty },
@@ -1412,6 +1424,55 @@ mod tests {
         assert!(matches!(counter_type, CounterMatch::OfType(_)));
     }
 
+    // "Remove one or more [type] counters" is a player-chosen variable count
+    // (CR 107.3 / 601.2b), not a literal 1. Before the fix, parse_number ate
+    // "one" as 1 and "or more +1/+1" leaked into a Generic counter type.
+    #[test]
+    fn parse_remove_one_or_more_counters_uses_x_sentinel() {
+        let (count, counter_type) =
+            parse_remove_counter_quantity_and_kind("one or more +1/+1 counters")
+                .expect("should parse 'one or more' counter removal");
+
+        assert_eq!(
+            count, REMOVE_COUNTER_COST_X,
+            "'one or more' should be encoded as the X sentinel, not literal 1"
+        );
+        assert_eq!(
+            counter_type,
+            CounterMatch::OfType(crate::types::counter::CounterType::Plus1Plus1),
+            "counter type must be typed +1/+1, not Generic(\"or more +1/+1\")"
+        );
+    }
+
+    #[test]
+    fn parse_remove_one_or_more_generic_counters_uses_x_sentinel() {
+        let (count, counter_type) =
+            parse_remove_counter_quantity_and_kind("one or more charge counters")
+                .expect("should parse 'one or more' generic counter removal");
+
+        assert_eq!(count, REMOVE_COUNTER_COST_X);
+        assert_eq!(
+            counter_type,
+            CounterMatch::OfType(crate::types::counter::CounterType::Generic(
+                "charge".to_string()
+            )),
+        );
+    }
+
+    // No-regression: the new tag("one or more ") must NOT over-match a bare
+    // singular "one [type] counter", which is a literal count of 1.
+    #[test]
+    fn parse_remove_one_singular_counter_uses_literal_one() {
+        let (count, counter_type) = parse_remove_counter_quantity_and_kind("one +1/+1 counter")
+            .expect("should parse singular 'one' counter removal");
+
+        assert_eq!(count, 1, "bare 'one' is a literal count of 1");
+        assert_eq!(
+            counter_type,
+            CounterMatch::OfType(crate::types::counter::CounterType::Plus1Plus1),
+        );
+    }
+
     #[test]
     fn cost_untap() {
         assert_eq!(parse_oracle_cost("{Q}"), AbilityCost::Untap);
@@ -1669,8 +1730,10 @@ mod tests {
     fn cost_pay_life_for_each_counter() {
         // CR 119.4 + CR 122.1: Tornado — "Pay 3 life for each velocity counter
         // on this enchantment". The per-counter multiplier must be preserved.
-        let expected_qty =
-            parse_for_each_clause("velocity counter on this enchantment").expect("for-each clause");
+        let (_, expected_qty) = nom_quantity::parse_for_each_clause_ref_complete(
+            "velocity counter on this enchantment",
+        )
+        .expect("for-each clause");
         assert!(matches!(
             expected_qty,
             QuantityRef::CountersOn {
@@ -1692,9 +1755,11 @@ mod tests {
     #[test]
     fn cost_pay_life_for_each_creature() {
         // Building-block test: the for-each composition covers any
-        // `parse_for_each_clause` form, not just counter scopes. factor: 1 is
+        // `parse_for_each_clause_ref` form, not just counter scopes. factor: 1 is
         // kept intentionally (resolves identically to a bare Ref).
-        let expected_qty = parse_for_each_clause("creature you control").expect("for-each clause");
+        let (_, expected_qty) =
+            nom_quantity::parse_for_each_clause_ref_complete("creature you control")
+                .expect("for-each clause");
         assert_eq!(
             parse_oracle_cost("Pay 1 life for each creature you control"),
             AbilityCost::PayLife {

@@ -113,9 +113,15 @@ pub mod gift_delivery;
 pub mod goad;
 pub mod grant_extra_loyalty_activations;
 pub mod grant_permission;
+pub mod heist;
 pub mod hideaway;
 pub mod incubate;
 pub mod intensify;
+// Tests for `heist` live in a sibling file (declared here, not in `heist.rs`,
+// so `heist.rs` stays implementation-only — no inline `#[cfg(test)]` token).
+#[cfg(test)]
+#[path = "heist_tests.rs"]
+mod heist_tests;
 #[cfg(test)]
 #[path = "intensify_tests.rs"]
 mod intensify_tests;
@@ -1605,6 +1611,9 @@ pub(super) fn resolve_optional_effect_decision(
     match choice {
         AutoMayChoice::Accept => {
             ability.context.optional_effect_performed = true;
+            state
+                .player_actions_this_way
+                .insert((ability.controller, PlayerActionKind::AcceptedOptionalEffect));
             resolve_ability_chain(state, &ability, events, depth)?;
             // CR 608.2c: When an optional effect's prompt suspended the parent
             // chain, the "If you do" sibling continuation was stashed BEFORE the
@@ -1955,7 +1964,9 @@ fn quantity_expr_references_demonstrative(qty: &QuantityExpr) -> bool {
         | QuantityExpr::DivideRounded { inner, .. } => {
             quantity_expr_references_demonstrative(inner)
         }
-        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_demonstrative),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_references_demonstrative)
+        }
         QuantityExpr::Difference { left, right } => {
             quantity_expr_references_demonstrative(left)
                 || quantity_expr_references_demonstrative(right)
@@ -2024,8 +2035,14 @@ fn detach_after_player_scope_local_chain(
     if next_is_co_scoped_anaphoric_consumer {
         next.player_scope = None;
     }
+    // "Each opponent may X and Y" makes the whole same-sentence X/Y clause
+    // optional for that opponent. Keep the continuation inside the scoped
+    // template so accepting the offer performs both instructions.
+    let next_is_optional_clause_continuation =
+        node.optional && next.sub_link == SubAbilityLink::ContinuationStep;
     if next_is_performed_gated
         || next_is_co_scoped_anaphoric_consumer
+        || next_is_optional_clause_continuation
         || is_player_scope_local_continuation(&node.effect, &next.effect)
     {
         let tail = detach_after_player_scope_local_chain(&mut next, scope, referent_in_scope);
@@ -2074,7 +2091,7 @@ fn collect_clause_minimum_refs<'a>(expr: &'a QuantityExpr, out: &mut Vec<&'a Qua
         | QuantityExpr::Power {
             exponent: inner, ..
         } => collect_clause_minimum_refs(inner, out),
-        QuantityExpr::Sum { exprs } => {
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for e in exprs {
                 collect_clause_minimum_refs(e, out);
             }
@@ -2502,6 +2519,15 @@ pub fn resolve_effect(
         // Currently a no-op; full interactive implementation requires WaitingFor infrastructure.
         Effect::TimeTravel => time_travel::resolve(state, ability, events),
         Effect::BecomeMonarch => become_monarch::resolve(state, ability, events),
+        // CR 101.3 + CR 608.2: An instruction with no game action. Emit
+        // `EffectResolved` so the chain continues, and do nothing else.
+        Effect::NoOp => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::NoOp,
+                source_id: ability.source_id,
+            });
+            Ok(())
+        }
         Effect::Proliferate => proliferate::resolve(state, ability, events),
         Effect::ProliferateTarget { .. } => proliferate::resolve_target(state, ability, events),
         Effect::EndTheTurn => end_the_turn::resolve(state, ability, events),
@@ -2618,6 +2644,13 @@ pub fn resolve_effect(
         Effect::ExileFromTopUntil { .. } => exile_from_top_until::resolve(state, ability, events),
         Effect::RevealUntil { .. } => reveal_until::resolve(state, ability, events),
         Effect::Discover { .. } => discover::resolve(state, ability, events),
+        // Heist (Arena digital-only): look step. Raises ChooseFromZoneChoice
+        // over random nonland cards from the targeted opponent's library and
+        // stashes a HeistExile continuation.
+        Effect::Heist { .. } => heist::resolve(state, ability, events),
+        // Heist finalizer continuation: exile the chosen card face down, link
+        // it, and grant a permanent any-color cast-from-exile permission.
+        Effect::HeistExile => heist::resolve_exile(state, ability, events),
         // CR 702.85a: Cascade — synthesized from the keyword at trigger time;
         // resolver performs the exile-until loop and sets CascadeChoice.
         Effect::Cascade => cascade::resolve(state, ability, events),
@@ -2886,7 +2919,9 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::DivideRounded { inner, .. } => quantity_expr_references_tracked_set(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_tracked_set),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_references_tracked_set)
+        }
         QuantityExpr::UpTo { max } => quantity_expr_references_tracked_set(max),
         QuantityExpr::Power { exponent, .. } => quantity_expr_references_tracked_set(exponent),
         QuantityExpr::Difference { left, right } => {
@@ -5340,6 +5375,8 @@ fn resolve_chain_body(
 
             let initial_waiting_for = state.waiting_for.clone();
             let mut iteration = 0usize;
+            let repeated_full_chain =
+                ability.repeat_for.is_some() && effective.sub_ability.is_some();
             while iteration < iterations {
                 // Snapshot per-iteration ability with parent-target rebinding when
                 // applicable. CR 109.5: the rebind is SINGLE-slot — every reachable
@@ -5392,7 +5429,13 @@ fn resolve_chain_body(
                 // `resolve_effect` does not check `optional`, which is correct
                 // because non-per-iteration loops apply their `optional` once up
                 // front in `resolve_chain_body`.
-                if (kind_driven || member_driven) && iter_effective.optional {
+                if repeated_full_chain {
+                    let mut full_chain_iteration = iter_effective.clone();
+                    full_chain_iteration.repeat_for = None;
+                    full_chain_iteration.copy_count_status =
+                        crate::types::ability::CopyCountStatus::Finalized;
+                    resolve_ability_chain(state, &full_chain_iteration, events, depth.max(1))?;
+                } else if (kind_driven || member_driven) && iter_effective.optional {
                     // CR 608.2c: pass a non-zero depth so the depth==0 prelude
                     // (chain-local state clearing, resolution counter) does not
                     // re-run mid-loop — this iteration continues the current
@@ -5451,6 +5494,9 @@ fn resolve_chain_body(
                     break;
                 }
                 iteration += 1;
+            }
+            if repeated_full_chain {
+                return Ok(());
             }
         } // end shares_quality_failed else
     }
@@ -5660,9 +5706,13 @@ fn resolve_chain_body(
         // exile-instead rider by stamping the granted casting permission. Do
         // not also execute the parser's structural `ChangeZone { ParentTarget }`
         // rider as an immediate move, or the graveyard card leaves before the
-        // player can cast it.
-        if matches!(&ability.effect, Effect::CastFromZone { .. })
-            && cast_from_zone::is_graveyard_exile_rider_subability(sub)
+        // player can cast it. Counter consumes the same structural rider during
+        // `counter::resolve` (stack -> exile directly) — skip the follow-up
+        // graveyard -> exile move so the spell never passes through the graveyard.
+        if matches!(
+            &ability.effect,
+            Effect::CastFromZone { .. } | Effect::Counter { .. }
+        ) && cast_from_zone::is_graveyard_exile_rider_subability(sub)
         {
             return Ok(());
         }
@@ -6615,7 +6665,9 @@ pub(crate) fn evaluate_condition(
                 _ => None,
             })
             .is_some_and(|spell_id| {
-                super::restrictions::triggering_spell_targets_filter(state, spell_id, filter)
+                super::restrictions::triggering_spell_targets_filter(
+                    state, spell_id, filter, spell_id,
+                )
             }),
         // CR 608.2c: "If this creature/permanent is a [type]" — check source object.
         AbilityCondition::SourceMatchesFilter { filter } => {
@@ -10718,6 +10770,7 @@ mod tests {
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,
+            enters_under: None,
         };
 
         assert_eq!(
@@ -12704,6 +12757,7 @@ mod tests {
             count: 0,
             reveal: false,
             up_to: true,
+            allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
             split: None,
         };

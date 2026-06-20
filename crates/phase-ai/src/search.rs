@@ -2600,6 +2600,7 @@ mod tests {
             count: 1,
             reveal: false,
             up_to: false,
+            allows_partial_find: false,
             constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
         };
@@ -2904,6 +2905,7 @@ mod tests {
             count: 4,
             reveal: true,
             up_to: true,
+            allows_partial_find: false,
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },
@@ -2965,6 +2967,7 @@ mod tests {
             controller,
             source_id: ObjectId(1),
             actor: engine::types::game_state::VoteActor::Delegated(controller),
+            tally_mode: engine::types::ability::VoteTally::PerVote,
         }
     }
 
@@ -3104,6 +3107,7 @@ mod tests {
             controller,
             source_id: ObjectId(1),
             actor: engine::types::game_state::VoteActor::SubjectActs,
+            tally_mode: engine::types::ability::VoteTally::PerVote,
         };
         let action = fallback_action(&state).expect("fallback returns an action");
         assert!(

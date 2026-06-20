@@ -851,7 +851,7 @@ fn quantity_expr_uses_filter_prop(
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_filter_prop(inner, pred),
-        QuantityExpr::Sum { exprs } => exprs
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
             .iter()
             .any(|inner| quantity_expr_uses_filter_prop(inner, pred)),
         QuantityExpr::Fixed { .. } => false,
@@ -5081,6 +5081,66 @@ mod tests {
             "counter restriction must survive, got {:?}",
             tf.properties
         );
+    }
+
+    /// CR 205.1b + CR 613.1d + CR 613.4b: Curious Colossus' ETB trigger uses
+    /// one comma-list continuous effect: affected creatures lose abilities,
+    /// gain a subtype, and get fixed base P/T indefinitely.
+    #[test]
+    fn curious_colossus_base_pt_comma_list_has_no_unimplemented_trigger_tail() {
+        let r = parse(
+            "When this creature enters, each creature target opponent controls loses all abilities, becomes a Coward in addition to its other types, and has base power and toughness 1/1.",
+            "Curious Colossus",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert_eq!(r.triggers.len(), 1, "{r:#?}");
+        let execute = r.triggers[0]
+            .execute
+            .as_ref()
+            .expect("ETB trigger should have an execute body");
+        assert!(
+            !has_unimplemented(execute),
+            "ETB trigger body must not contain Unimplemented effects: {execute:#?}"
+        );
+        match &*execute.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(*duration, None);
+                let mods: Vec<_> = static_abilities
+                    .iter()
+                    .flat_map(|s| s.modifications.iter())
+                    .collect();
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::RemoveAllAbilities)),
+                    "must contain RemoveAllAbilities: {mods:?}"
+                );
+                assert!(
+                    mods.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddSubtype { subtype }
+                            if subtype == "Coward"
+                    )),
+                    "must contain AddSubtype(Coward): {mods:?}"
+                );
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::SetPower { value: 1 })),
+                    "must contain SetPower(1): {mods:?}"
+                );
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1 })),
+                    "must contain SetToughness(1): {mods:?}"
+                );
+            }
+            other => panic!("expected GenericEffect execute body, got {other:?}"),
+        }
     }
 
     /// Issue #69 (Triad of Fates): "Exile target creature that has a fate counter
@@ -14694,6 +14754,73 @@ At the beginning of your upkeep, add {C} for each artifact you control. This man
             )
             .map(|(r, _)| r),
             Some(ManaSpendRestriction::XCostOnly)
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_disjunction_two_spell_types() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        // Maelstrom of the Spirit Dragon: two heterogeneous spell-type clauses.
+        let (restriction, grants) = parse_mana_spend_restriction(
+            "spend this mana only to cast a dragon spell or an omen spell",
+        )
+        .expect("disjunction should parse");
+        assert_eq!(
+            restriction,
+            ManaSpendRestriction::Any(vec![
+                ManaSpendRestriction::SpellType("Dragon".to_string()),
+                ManaSpendRestriction::SpellType("Omen".to_string()),
+            ])
+        );
+        assert!(grants.is_empty());
+    }
+
+    #[test]
+    fn mana_spend_restriction_disjunction_three_way_heterogeneous() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::keywords::KeywordKind;
+        use crate::types::mana::AbilityActivationScope;
+        // Brotherhood Headquarters: spell type / keyword / activation-of-type.
+        let (restriction, _) = parse_mana_spend_restriction(
+            "spend this mana only to cast an assassin spell or a spell that has freerunning, or to activate an ability of an assassin source",
+        )
+        .expect("three-way disjunction should parse");
+        assert_eq!(
+            restriction,
+            ManaSpendRestriction::Any(vec![
+                ManaSpendRestriction::SpellType("Assassin".to_string()),
+                ManaSpendRestriction::SpellWithKeywordKind(KeywordKind::Freerunning),
+                ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type: "Assassin".to_string(),
+                    ability: AbilityActivationScope::OfSpellType,
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_disjunction_with_xcost_clause_gaps() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        // Cultivator Drone: the "pay a cost that contains {c}" clause has no
+        // self-evaluable restriction, so the whole disjunction is left as a gap.
+        assert_eq!(
+            parse_mana_spend_restriction(
+                "spend this mana only to cast a colorless spell, activate an ability of a colorless permanent, or pay a cost that contains {c}"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_type_union_stays_single_clause() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        // A type union inside one clause must NOT split into a disjunction.
+        let (restriction, _) =
+            parse_mana_spend_restriction("spend this mana only to cast instant or sorcery spells")
+                .expect("type union should parse as a single SpellType");
+        assert_eq!(
+            restriction,
+            ManaSpendRestriction::SpellType("Instant or Sorcery".to_string())
         );
     }
 

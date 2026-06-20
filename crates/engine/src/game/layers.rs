@@ -15,7 +15,10 @@ use crate::game::game_object::DisplaySource;
 use crate::game::printed_cards::{
     apply_copiable_values, ensure_keyword_triggers_for_copiable_values, intrinsic_copiable_values,
 };
-use crate::game::quantity::{filter_uses_recipient, quantity_expr_uses_recipient, QuantityContext};
+use crate::game::quantity::{
+    continuous_modification_dynamic_quantity, filter_uses_recipient, quantity_expr_uses_recipient,
+    QuantityContext,
+};
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastingPermission,
@@ -1714,7 +1717,7 @@ pub(crate) fn incremental_flush_must_escalate(
     if collect_shared_active_continuous_effects(state)
         .iter()
         .any(|e| {
-            let magnitude = modification_dynamic_quantity(&e.modification);
+            let magnitude = continuous_modification_dynamic_quantity(&e.modification);
             let magnitude_sensitive =
                 magnitude.is_some_and(crate::game::quantity::quantity_expr_uses_object_count);
             let affected_sensitive =
@@ -3377,79 +3380,6 @@ fn record_attribution(
     }
 }
 
-/// Single authority extracting the dynamic `QuantityExpr` magnitude carried by a
-/// `ContinuousModification`, if any. Both the dynamic-P/T apply site
-/// (`apply_continuous_effect`) and the incremental-flush escalation scan
-/// (`flush_layers`) call this so there is one place that decides which
-/// modifications carry a runtime-resolved magnitude.
-///
-/// EXHAUSTIVE and wildcard-free over `ContinuousModification` so a future
-/// variant that carries a `QuantityExpr` must be classified here at compile
-/// time rather than silently slipping past the escalation scan. `AddCounterOnEnter`
-/// also carries a `QuantityExpr` but is resolution-time-consumed by the
-/// BecomeCopy / CopyTokenOf resolvers and never reaches `apply_continuous_effect`
-/// (see its doc comment), so it is excluded.
-/// CR 613.1: Dynamic continuous modifications are evaluated while applying
-/// continuous effects through the layer system.
-fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&QuantityExpr> {
-    match m {
-        ContinuousModification::SetDynamicPower { value }
-        | ContinuousModification::SetDynamicToughness { value }
-        | ContinuousModification::SetPowerDynamic { value }
-        | ContinuousModification::SetToughnessDynamic { value }
-        | ContinuousModification::AddDynamicPower { value }
-        | ContinuousModification::AddDynamicToughness { value }
-        | ContinuousModification::AddDynamicKeyword { value, .. } => Some(value),
-        // Resolution-time-consumed; never an active continuous effect.
-        ContinuousModification::AddCounterOnEnter { .. }
-        | ContinuousModification::SetStartingLoyalty { .. } => None,
-        // Non-dynamic modifications carry plain i32 / enum payloads, no dynamic
-        // magnitude. Enumerated explicitly (no wildcard) so a future
-        // QuantityExpr-carrying variant forces a decision here.
-        ContinuousModification::CopyValues { .. }
-        | ContinuousModification::SetName { .. }
-        | ContinuousModification::AddPower { .. }
-        | ContinuousModification::AddToughness { .. }
-        | ContinuousModification::SetPower { .. }
-        | ContinuousModification::SetToughness { .. }
-        | ContinuousModification::AddKeyword { .. }
-        | ContinuousModification::RemoveKeyword { .. }
-        | ContinuousModification::GrantAbility { .. }
-        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
-        | ContinuousModification::GrantTrigger { .. }
-        | ContinuousModification::RemoveAllAbilities
-        | ContinuousModification::AddType { .. }
-        | ContinuousModification::RemoveType { .. }
-        | ContinuousModification::AddSubtype { .. }
-        | ContinuousModification::RemoveSubtype { .. }
-        | ContinuousModification::SetCardTypes { .. }
-        | ContinuousModification::RemoveAllSubtypes { .. }
-        | ContinuousModification::AddAllCreatureTypes
-        | ContinuousModification::AddAllBasicLandTypes
-        | ContinuousModification::AddAllLandTypes
-        | ContinuousModification::AddChosenSubtype { .. }
-        | ContinuousModification::AddChosenColor
-        | ContinuousModification::RemoveChosenKeyword
-        | ContinuousModification::AddChosenKeyword
-        | ContinuousModification::SetColor { .. }
-        | ContinuousModification::AddColor { .. }
-        | ContinuousModification::AddStaticMode { .. }
-        | ContinuousModification::GrantStaticAbility { .. }
-        | ContinuousModification::SwitchPowerToughness
-        | ContinuousModification::AssignDamageFromToughness
-        | ContinuousModification::AssignDamageAsThoughUnblocked
-        | ContinuousModification::AssignNoCombatDamage
-        | ContinuousModification::ChangeController
-        | ContinuousModification::SetBasicLandType { .. }
-        | ContinuousModification::SetChosenBasicLandType
-        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
-        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
-        | ContinuousModification::AddSupertype { .. }
-        | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::RemoveManaCost => None,
-    }
-}
-
 fn apply_continuous_effect(
     state: &mut GameState,
     effect: &ActiveContinuousEffect,
@@ -3634,7 +3564,7 @@ fn apply_continuous_effect_filtered(
     // referent. Recipient-relative quantities ("attached to it", "other",
     // "shares a type with it") need the affected object bound before
     // resolution, so those defer into the per-recipient loop below.
-    let dynamic_pt_expr = modification_dynamic_quantity(&effect.modification);
+    let dynamic_pt_expr = continuous_modification_dynamic_quantity(&effect.modification);
     let effect_controller = state
         .objects
         .get(&effect.source_id)
@@ -12715,5 +12645,180 @@ mod tests {
                 "effect {i}: layer must match between index and full-scan"
             );
         }
+    }
+
+    /// CR 611.3a + CR 613: End-to-end runtime confirmation that Shield of the
+    /// Oversoul's color-conditional grants apply correctly on multicolored
+    /// creatures. A green/white creature must receive BOTH clauses (+2/+2,
+    /// flying, indestructible), a mono-green creature only the green clause
+    /// (+1/+1, indestructible), and a mono-red creature neither. Regression
+    /// test for issue #2674.
+    #[test]
+    fn shield_of_the_oversoul_color_conditional_on_multicolor_creature() {
+        let mut state = setup();
+
+        // Parse Shield of the Oversoul's two static lines via the production parser.
+        let white_def = crate::parser::oracle_static::parse_static_line(
+            "As long as enchanted creature is white, it gets +1/+1 and has flying.",
+        )
+        .expect("white clause must parse");
+        let green_def = crate::parser::oracle_static::parse_static_line(
+            "As long as enchanted creature is green, it gets +1/+1 and has indestructible.",
+        )
+        .expect("green clause must parse");
+
+        // --- Multicolored (green/white) creature ---
+        let gw_creature = make_creature(&mut state, "Wilt-Leaf Liege", 4, 4, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&gw_creature).unwrap();
+            obj.color = vec![ManaColor::Green, ManaColor::White];
+            obj.base_color = obj.color.clone();
+        }
+
+        let aura_gw = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Shield of the Oversoul (GW)".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura_gw).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.attached_to = Some(gw_creature.into());
+            obj.timestamp = ts;
+            obj.static_definitions.push(white_def.clone());
+            obj.static_definitions.push(green_def.clone());
+        }
+        state
+            .objects
+            .get_mut(&gw_creature)
+            .unwrap()
+            .attachments
+            .push(aura_gw);
+
+        // --- Mono-green creature ---
+        let g_creature = make_creature(&mut state, "Llanowar Elves", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&g_creature).unwrap();
+            obj.color = vec![ManaColor::Green];
+            obj.base_color = obj.color.clone();
+        }
+
+        let aura_g = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Shield of the Oversoul (G)".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura_g).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.attached_to = Some(g_creature.into());
+            obj.timestamp = ts;
+            obj.static_definitions.push(white_def.clone());
+            obj.static_definitions.push(green_def.clone());
+        }
+        state
+            .objects
+            .get_mut(&g_creature)
+            .unwrap()
+            .attachments
+            .push(aura_g);
+
+        // --- Mono-red creature (no match) ---
+        let r_creature = make_creature(&mut state, "Goblin Guide", 2, 2, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&r_creature).unwrap();
+            obj.color = vec![ManaColor::Red];
+            obj.base_color = obj.color.clone();
+        }
+
+        let aura_r = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Shield of the Oversoul (R)".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura_r).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.attached_to = Some(r_creature.into());
+            obj.timestamp = ts;
+            obj.static_definitions.push(white_def);
+            obj.static_definitions.push(green_def);
+        }
+        state
+            .objects
+            .get_mut(&r_creature)
+            .unwrap()
+            .attachments
+            .push(aura_r);
+
+        // Run the full layer pipeline.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        // Assert: multicolored (GW) creature gets both clauses.
+        let gw = state.objects.get(&gw_creature).unwrap();
+        assert_eq!(
+            gw.power,
+            Some(6),
+            "GW creature: 4 base + 1 (white) + 1 (green) = 6"
+        );
+        assert_eq!(
+            gw.toughness,
+            Some(6),
+            "GW creature: 4 base + 1 (white) + 1 (green) = 6"
+        );
+        assert!(
+            gw.has_keyword(&Keyword::Flying),
+            "GW creature must gain flying from white clause"
+        );
+        assert!(
+            gw.has_keyword(&Keyword::Indestructible),
+            "GW creature must gain indestructible from green clause"
+        );
+
+        // Assert: mono-green creature gets only the green clause.
+        let g = state.objects.get(&g_creature).unwrap();
+        assert_eq!(g.power, Some(2), "Mono-G creature: 1 base + 1 (green) = 2");
+        assert_eq!(
+            g.toughness,
+            Some(2),
+            "Mono-G creature: 1 base + 1 (green) = 2"
+        );
+        assert!(
+            !g.has_keyword(&Keyword::Flying),
+            "Mono-G creature must NOT gain flying (not white)"
+        );
+        assert!(
+            g.has_keyword(&Keyword::Indestructible),
+            "Mono-G creature must gain indestructible from green clause"
+        );
+
+        // Assert: mono-red creature gets nothing.
+        let r = state.objects.get(&r_creature).unwrap();
+        assert_eq!(r.power, Some(2), "Mono-R creature: 2 base, no bonus");
+        assert_eq!(r.toughness, Some(2), "Mono-R creature: 2 base, no bonus");
+        assert!(
+            !r.has_keyword(&Keyword::Flying),
+            "Mono-R creature must NOT gain flying"
+        );
+        assert!(
+            !r.has_keyword(&Keyword::Indestructible),
+            "Mono-R creature must NOT gain indestructible"
+        );
     }
 }

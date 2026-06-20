@@ -668,6 +668,9 @@ fn try_parse_can_attack_with_defender(
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::new(StaticMode::CanAttackWithDefender)
                 .affected(affected)
+                .modifications(vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CanAttackWithDefender,
+                }])
                 .description(text.to_string())],
             duration: duration.clone(),
             target: application.target,
@@ -2093,6 +2096,25 @@ fn build_continuous_clause(
     let (predicate_text, fallback_duration) = super::strip_trailing_duration(&normalized);
     let duration = duration.or(fallback_duration);
 
+    if let Some(static_abilities) =
+        build_defender_attack_continuous_compound(&application, predicate_text)
+    {
+        return Some(ParsedEffectClause {
+            effect: Effect::GenericEffect {
+                static_abilities,
+                duration: duration.clone(),
+                target: application.target,
+            },
+            duration,
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
+    }
+
     let modifications = parse_continuous_modifications(predicate_text);
     if modifications.is_empty() {
         return None;
@@ -2482,18 +2504,76 @@ fn build_become_clause(
     })
 }
 
+/// Capture a card name following `" named "`, terminating at a trailing
+/// conjunction or sentence break. "becomes … named Fenric and loses all
+/// abilities" yields the name `"Fenric"` (not `"Fenric and loses all
+/// abilities"`); the residual `"and loses all abilities"` is recovered
+/// independently by `parse_continuous_modifications` on the full predicate.
+/// CR 201.4: an effect-assigned name is a single token-or-phrase, not the rest
+/// of the clause.
 fn strip_become_name_override(text: &str) -> (String, Option<String>) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     let Some((before, after)) = tp.split_around(" named ") else {
         return (text.to_string(), None);
     };
-    let name = after.original.trim().trim_end_matches('.').to_string();
+    // The name extends up to a trailing " and <clause-verb>" conjunction that
+    // introduces a FURTHER modification ("named Fenric and loses all abilities").
+    // Commas are NOT terminators — names legitimately contain them ("Everflame,
+    // Heroes' Legacy"). The trailing period is handled by `trim_end_matches('.')`.
+    let after_lower = after.lower;
+    let name_len = take_until_name_terminator(after_lower)
+        .map(|(_, captured)| captured.len())
+        .unwrap_or(after_lower.len());
+    let name = after.original[..name_len]
+        .trim()
+        .trim_end_matches('.')
+        .to_string();
     if name.is_empty() {
         (before.original.trim().to_string(), None)
     } else {
         (before.original.trim().to_string(), Some(name))
     }
+}
+
+/// Capture the name text up to (but not including) a trailing `" and <verb>"`
+/// conjunction that begins a further modification clause (`" and loses all
+/// abilities"`, `" and has flying"`). Commas and other punctuation are NOT
+/// terminators — a card name may legitimately contain a comma ("Everflame,
+/// Heroes' Legacy"). Returns the captured name slice; on no terminator the
+/// caller falls back to the full remainder (trailing period stripped there).
+fn take_until_name_terminator(input: &str) -> OracleResult<'_, &str> {
+    // The terminator is the word "and" introducing a continuous-modification
+    // clause verb ("and loses all abilities", "and has flying"). A bare "and"
+    // inside a name ("Trial and Error") is NOT followed by a clause verb and is
+    // kept. The scan starts each candidate at a word boundary, so "and" is the
+    // first token of the slice (no leading space).
+    fn and_clause_verb(i: &str) -> OracleResult<'_, ()> {
+        let (i, _) = tag("and ").parse(i)?;
+        value(
+            (),
+            alt((
+                tag("loses "),
+                tag("lose "),
+                tag("gains "),
+                tag("gain "),
+                tag("has "),
+                tag("have "),
+                tag("is "),
+                tag("are "),
+                tag("becomes "),
+                tag("can't "),
+                tag("gets "),
+            )),
+        )
+        .parse(i)
+    }
+    // UTF-8-safe word-boundary scan: never indexes mid-codepoint, unlike a raw
+    // byte-increment loop. The captured prefix includes the trailing space
+    // before "and" (e.g. "Fenric "); the caller trims it.
+    nom_primitives::scan_split_at_phrase(input, and_clause_verb)
+        .map(|(name, rest)| (rest, name))
+        .ok_or_else(|| nom::Err::Error(OracleError::new(input, nom::error::ErrorKind::TakeUntil)))
 }
 
 fn try_parse_become_and_attack_if_able(
@@ -2931,6 +3011,78 @@ fn build_restriction_clause(
         optional: false,
         unless_pay: None,
     })
+}
+
+fn build_defender_attack_continuous_compound(
+    application: &SubjectApplication,
+    predicate_text: &str,
+) -> Option<Vec<StaticDefinition>> {
+    // CR 702.3b + CR 510.1c + CR 611.2c: A resolved ability can grant one
+    // targeted creature multiple continuous pieces at once: characteristics
+    // (haste), a defender attack rule exception, and toughness-based damage
+    // assignment. Split only the grammar that contains the defender exception so
+    // ordinary keyword lists continue through the shared continuous parser.
+    let segments = split_continuous_compound_segments(predicate_text);
+    if segments.len() < 2
+        || !segments
+            .iter()
+            .any(|segment| is_can_attack_despite_defender_predicate(&segment.to_lowercase()))
+    {
+        return None;
+    }
+
+    let affected = static_affected_for_application(application);
+    let mut static_abilities = Vec::new();
+
+    for segment in segments {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        let lower = segment.to_lowercase();
+        if is_can_attack_despite_defender_predicate(&lower) {
+            static_abilities.push(
+                StaticDefinition::new(StaticMode::CanAttackWithDefender)
+                    .affected(affected.clone())
+                    .modifications(vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CanAttackWithDefender,
+                    }])
+                    .description(segment.to_string()),
+            );
+            continue;
+        }
+
+        let modifications = parse_continuous_modifications(segment);
+        if modifications.is_empty() {
+            return None;
+        }
+        static_abilities.push(
+            StaticDefinition::continuous()
+                .affected(affected.clone())
+                .modifications(modifications)
+                .description(segment.to_string()),
+        );
+    }
+
+    (!static_abilities.is_empty()).then_some(static_abilities)
+}
+
+fn split_continuous_compound_segments(predicate_text: &str) -> Vec<&str> {
+    predicate_text
+        .trim()
+        .trim_end_matches('.')
+        .split(',')
+        .map(|segment| strip_leading_conjunction(segment.trim()))
+        .collect()
+}
+
+fn strip_leading_conjunction(segment: &str) -> &str {
+    let lower = segment.to_lowercase();
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("and ").parse(lower.as_str()) {
+        let consumed = lower.len() - rest.len();
+        return segment[consumed..].trim_start();
+    }
+    segment
 }
 
 // CR 613.2 layer 6 + CR 509.1b: Combat / untap restriction modes granted
@@ -3594,7 +3746,12 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
 ];
 
 fn is_restriction_predicate_verb(token: &str) -> bool {
-    matches!(token, "can't" | "cannot")
+    // CR 613.1d: "isn't"/"aren't" head a layer-4 type-removal predicate ("~ isn't
+    // a creature until end of turn", Blink's Alien Angel token). Recognizing the
+    // copula-negation here lets `find_predicate_start` split subject from
+    // predicate so the continuous-clause path produces a `RemoveType`
+    // modification (via `parse_continuous_modifications`).
+    matches!(token, "can't" | "cannot" | "isn't" | "aren't")
 }
 
 fn token_starts_predicate(token: &str) -> bool {
@@ -3657,6 +3814,56 @@ mod tests {
     };
     use crate::types::card_type::Supertype;
     use crate::types::statics::BlockExceptionKind;
+
+    // CR 613.1d: "~ isn't a <core type>" must lower to a one-shot continuous
+    // effect that REMOVES the type (RemoveType modification on SelfRef). Building
+    // block for Blink's Alien Angel token ("this token isn't a creature until end
+    // of turn"); exercised here on the normalized self-ref form.
+    #[test]
+    fn self_ref_isnt_a_creature_removes_type() {
+        let effect = super::super::parse_effect("~ isn't a creature");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = effect
+        else {
+            panic!("expected GenericEffect, got {effect:?}");
+        };
+        assert!(
+            static_abilities[0].modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::RemoveType {
+                    core_type: crate::types::card_type::CoreType::Creature
+                }
+            )),
+            "expected RemoveType(Creature), got {:?}",
+            static_abilities[0].modifications
+        );
+    }
+
+    // CR 201.4: a "named X" effect-assigned name terminates at the first
+    // conjunction — "becomes … named Fenric and loses all abilities" yields
+    // name "Fenric", not "Fenric and loses all abilities". The residual "loses
+    // all abilities" is recovered independently as RemoveAllAbilities. Building
+    // block for The Curse of Fenric II.
+    #[test]
+    fn become_named_terminates_at_conjunction() {
+        let (before, name) = strip_become_name_override(
+            "becomes a 6/6 Horror creature named Fenric and loses all abilities",
+        );
+        assert_eq!(name.as_deref(), Some("Fenric"));
+        assert_eq!(
+            before, "becomes a 6/6 Horror creature",
+            "the ' named ...' clause must be removed from the residual"
+        );
+    }
+
+    // Regression: a plain "named X" with no trailing conjunction still captures
+    // the full name token.
+    #[test]
+    fn become_named_plain_captures_full_name() {
+        let (_, name) = strip_become_name_override("becomes a creature named Serra Angel");
+        assert_eq!(name.as_deref(), Some("Serra Angel"));
+    }
 
     /// CR 702.3b: the subjectless conjunct recognizer accepts every grammatical
     /// shape the sequence splitter can leave behind ("this turn" optional, both

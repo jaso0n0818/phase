@@ -4,7 +4,7 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, Effect, EffectKind, EffectScope, ResolvedAbility,
     SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
 };
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AutoMayChoice, GameState, PendingContinuation, WaitingFor,
 };
@@ -30,6 +30,7 @@ pub(super) fn handle_optional_effect_choice(
     accept: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let events_before = events.len();
     state.cost_payment_failed_flag = false;
     set_active_priority(state);
 
@@ -60,6 +61,12 @@ pub(super) fn handle_optional_effect_choice(
     }
 
     resume_pending_continuation_if_priority(state, events)?;
+    // CR 603.2 + CR 608.2e: player_scope optional iterations (e.g. Kwain's
+    // "each player may draw") pause on the next player's OptionalEffectChoice
+    // before this action settles — park draw observers now. When settled to
+    // Priority, `run_post_action_pipeline` owns dispatch; `SpellCopied` is
+    // excluded because `copy_spell` already deferred it (issue #2866).
+    super::triggers::park_observer_triggers_if_paused(state, events, events_before);
     if state.resolving_begin_game_abilities
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
     {
@@ -93,6 +100,7 @@ pub(super) fn handle_opponent_may_choice(
     accept: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
+    let events_before = events.len();
     let WaitingFor::OpponentMayChoice {
         player: promptee,
         remaining,
@@ -158,6 +166,9 @@ pub(super) fn handle_opponent_may_choice(
             if let Some(legal) = target_selection {
                 if !legal.is_empty() {
                     ability.context.optional_effect_performed = true;
+                    state
+                        .player_actions_this_way
+                        .insert((promptee, PlayerActionKind::AcceptedOptionalEffect));
                     if let Some(mut sub) = ability.sub_ability.take() {
                         // CR 608.2c + CR 608.2d: the "If a player does, …"
                         // consequence runs because the player accepted. Carry the
@@ -199,6 +210,9 @@ pub(super) fn handle_opponent_may_choice(
                 resolve_all_declined_opponent_may(state, &ability, events)?;
             } else {
                 ability.context.optional_effect_performed = true;
+                state
+                    .player_actions_this_way
+                    .insert((promptee, PlayerActionKind::AcceptedOptionalEffect));
                 if matches!(ability.effect, Effect::DealDamage { .. }) {
                     ability.targets = vec![TargetRef::Player(promptee)];
                 }
@@ -225,6 +239,7 @@ pub(super) fn handle_opponent_may_choice(
     }
 
     resume_pending_continuation_if_priority(state, events)?;
+    super::triggers::collect_and_drain_observer_triggers_if_settled(state, events, events_before);
     Ok(action_result(events, state.waiting_for.clone()))
 }
 

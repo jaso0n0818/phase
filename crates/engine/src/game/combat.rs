@@ -14,7 +14,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 use crate::types::statics::{
-    BlockExceptionKind, CombatAloneAction, CombatAloneRequirement, StaticMode,
+    AttackDefenderScope, BlockExceptionKind, CombatAloneAction, CombatAloneRequirement, StaticMode,
 };
 use crate::types::zones::Zone;
 
@@ -511,13 +511,73 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
     Ok(())
 }
 
+/// CR 508.1c: The global "no more than N creatures can attack each combat" cap
+/// (`defender: None`). Defender-scoped caps ("...attack you each combat") are
+/// enforced separately by `validate_per_defender_attacker_caps` because they
+/// restrict only attacks against a specific player.
 fn max_attackers_each_combat(state: &GameState) -> Option<u32> {
     super::functioning_abilities::battlefield_active_statics(state)
         .filter_map(|(_, def)| match def.mode {
-            StaticMode::MaxAttackersEachCombat { max } => Some(max),
+            StaticMode::MaxAttackersEachCombat {
+                max,
+                defender: None,
+            } => Some(max),
             _ => None,
         })
         .min()
+}
+
+/// CR 508.1c + CR 802.1: Enforce defender-scoped attacker caps
+/// (`MaxAttackersEachCombat { defender: Some(_) }`, e.g. Judoon Enforcers'
+/// "no more than one creature can attack you each combat"). Each such static
+/// limits only creatures directly attacking the static's controller, so
+/// opponents and non-player permanents may still be attacked freely. Returns an
+/// error if any active defender-scoped cap is exceeded.
+fn validate_per_defender_attacker_caps(
+    state: &GameState,
+    attacks: &[(ObjectId, AttackTarget)],
+) -> Result<(), String> {
+    for (source, def) in super::functioning_abilities::battlefield_active_statics(state) {
+        let StaticMode::MaxAttackersEachCombat {
+            max,
+            defender: Some(AttackDefenderScope::Controller),
+        } = def.mode
+        else {
+            continue;
+        };
+        // CR 109.5: "you" resolves to the controller of the permanent carrying
+        // the static.
+        let protected_player = source.controller;
+        let count = attacks
+            .iter()
+            .filter(|(_, target)| matches!(target, AttackTarget::Player(pid) if *pid == protected_player))
+            .count() as u32;
+        if count > max {
+            return Err(format!(
+                "No more than {max} creature(s) can attack {protected_player:?} each combat (CR 508.1c)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// CR 508.5 + CR 310.8d: Resolve the defending player for an `AttackTarget` —
+/// the player for a direct attack, a planeswalker's controller, or a battle's
+/// protector.
+fn defending_player_for_target(state: &GameState, target: AttackTarget) -> PlayerId {
+    match target {
+        AttackTarget::Player(pid) => pid,
+        AttackTarget::Planeswalker(pw_id) => state
+            .objects
+            .get(&pw_id)
+            .map(|pw| pw.controller)
+            .unwrap_or(PlayerId(0)),
+        AttackTarget::Battle(battle_id) => state
+            .objects
+            .get(&battle_id)
+            .and_then(|b| b.protector())
+            .unwrap_or(PlayerId(0)),
+    }
 }
 
 /// Iterate every battlefield `StaticDefinition` whose mode is a block-restriction
@@ -2004,6 +2064,10 @@ pub fn declare_attackers_with_bands(
 ) -> Result<(), String> {
     let attacker_ids: Vec<ObjectId> = attacks.iter().map(|(id, _)| *id).collect();
     validate_attackers(state, &attacker_ids)?;
+    // CR 508.1c + CR 508.5: defender-scoped attacker caps ("...attack you each
+    // combat") need per-target defending players, which only the full `attacks`
+    // slice carries — enforce them here rather than in `validate_attackers`.
+    validate_per_defender_attacker_caps(state, attacks)?;
     if !bands.is_empty() {
         validate_attack_band_declarations(state, attacks, bands)?;
     }
@@ -2209,19 +2273,7 @@ pub fn declare_attackers_with_bands(
         .map(|(object_id, target)| {
             // CR 508.5 + CR 310.8d: Defending player for a battle = its protector,
             // not its controller. For planeswalkers, defending player = controller.
-            let defending_player = match target {
-                AttackTarget::Player(pid) => *pid,
-                AttackTarget::Planeswalker(pw_id) => state
-                    .objects
-                    .get(pw_id)
-                    .map(|pw| pw.controller)
-                    .unwrap_or(PlayerId(0)),
-                AttackTarget::Battle(battle_id) => state
-                    .objects
-                    .get(battle_id)
-                    .and_then(|b| b.protector())
-                    .unwrap_or(PlayerId(0)),
-            };
+            let defending_player = defending_player_for_target(state, *target);
             AttackerInfo::new(*object_id, *target, defending_player)
         })
         .collect();
@@ -3289,6 +3341,26 @@ mod tests {
         id
     }
 
+    fn create_battle(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        protector: PlayerId,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Battle);
+        obj.chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::Player(protector));
+        id
+    }
+
     #[test]
     fn valid_attacker_succeeds() {
         let mut state = setup();
@@ -3343,6 +3415,79 @@ mod tests {
         assert!(validate_attackers(&state, &[unflagged]).is_ok());
         // Two unflagged creatures: legal.
         assert!(validate_attackers(&state, &[unflagged, companion]).is_ok());
+    }
+
+    #[test]
+    fn defender_scoped_attacker_cap_limits_attacks_against_controller() {
+        // CR 508.1c + CR 508.5 + CR 802.1: Judoon Enforcers — "No more than one
+        // creature can attack you each combat." Player 1 controls the static;
+        // player 0 (active) may send at most one attacker at player 1.
+        let mut state = setup();
+        let enforcers = create_creature(&mut state, PlayerId(1), "Judoon Enforcers", 8, 8);
+        state
+            .objects
+            .get_mut(&enforcers)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MaxAttackersEachCombat {
+                max: 1,
+                defender: Some(AttackDefenderScope::Controller),
+            }));
+        let a = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let b = create_creature(&mut state, PlayerId(0), "Elk", 2, 2);
+
+        // One attacker against player 1: legal.
+        assert!(validate_per_defender_attacker_caps(
+            &state,
+            &[(a, AttackTarget::Player(PlayerId(1)))]
+        )
+        .is_ok());
+        // Two attackers against player 1: illegal.
+        assert!(validate_per_defender_attacker_caps(
+            &state,
+            &[
+                (a, AttackTarget::Player(PlayerId(1))),
+                (b, AttackTarget::Player(PlayerId(1))),
+            ],
+        )
+        .is_err());
+        // A defender-scoped cap must NOT register as a global per-combat cap —
+        // the two enforcement paths are independent (CR 508.1c).
+        assert_eq!(max_attackers_each_combat(&state), None);
+
+        // Two attackers against an unprotected player: legal.
+        assert!(validate_per_defender_attacker_caps(
+            &state,
+            &[
+                (a, AttackTarget::Player(PlayerId(2))),
+                (b, AttackTarget::Player(PlayerId(2))),
+            ],
+        )
+        .is_ok());
+
+        // "Attack you" is a direct-player scope. It does not include attacking a
+        // planeswalker controlled by that player.
+        let protected_planeswalker = create_planeswalker(&mut state, PlayerId(1), "Jace");
+        assert!(validate_per_defender_attacker_caps(
+            &state,
+            &[
+                (a, AttackTarget::Planeswalker(protected_planeswalker)),
+                (b, AttackTarget::Planeswalker(protected_planeswalker)),
+            ],
+        )
+        .is_ok());
+
+        // Nor does it include attacking a battle protected by that player.
+        let protected_battle =
+            create_battle(&mut state, PlayerId(0), "Invasion of Test", PlayerId(1));
+        assert!(validate_per_defender_attacker_caps(
+            &state,
+            &[
+                (a, AttackTarget::Battle(protected_battle)),
+                (b, AttackTarget::Battle(protected_battle)),
+            ],
+        )
+        .is_ok());
     }
 
     #[test]
@@ -3456,6 +3601,66 @@ mod tests {
             .keywords
             .push(Keyword::Defender);
         assert!(validate_attackers(&state, &[id]).is_err());
+    }
+
+    #[test]
+    fn walking_bulwark_grants_defender_creature_attack_permission() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        // CR 702.3b + CR 611.2c: The resolved ability grants a targeted
+        // defender an until-end-of-turn rule exception that lets it attack.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bulwark = scenario
+            .add_creature_from_oracle(
+                PlayerId(0),
+                "Walking Bulwark",
+                0,
+                3,
+                "Defender\n{2}: Until end of turn, target creature with defender gains haste, can attack as though it didn't have defender, and assigns combat damage equal to its toughness rather than its power. Activate only as a sorcery.",
+            )
+            .id();
+        let wall = scenario
+            .add_creature(PlayerId(0), "Target Wall", 0, 4)
+            .defender()
+            .with_summoning_sickness()
+            .id();
+        scenario.with_mana_pool(
+            PlayerId(0),
+            vec![
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, Vec::new()),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, Vec::new()),
+            ],
+        );
+
+        let mut runner = scenario.build();
+        runner.activate(bulwark, 0).target_object(wall).resolve();
+
+        assert!(
+            runner
+                .state()
+                .objects
+                .get(&wall)
+                .unwrap()
+                .has_keyword(&Keyword::Haste),
+            "Walking Bulwark must grant haste to the targeted defender"
+        );
+        assert!(
+            validate_attackers(runner.state(), &[wall]).is_ok(),
+            "Walking Bulwark's transient CanAttackWithDefender grant must let the targeted defender attack"
+        );
+
+        runner.advance_to_combat();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ));
+        runner
+            .declare_attackers(&[(wall, AttackTarget::Player(PlayerId(1)))])
+            .expect("targeted defender should be legal to declare as an attacker");
     }
 
     /// CR 702.3b + CR 122.1: Demon Wall — "as long as this creature has a
@@ -4614,6 +4819,64 @@ mod tests {
         let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
 
         assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    #[test]
+    fn kappa_cannoneer_artifact_enter_trigger_makes_it_unblockable() {
+        use crate::game::scenario::GameScenario;
+        use crate::game::triggers::process_triggers;
+        use crate::game::zones::move_to_zone;
+        use crate::types::actions::GameAction;
+        use crate::types::counter::CounterType;
+        use crate::types::zones::Zone;
+
+        let mut scenario = GameScenario::new();
+        let cannoneer = scenario
+            .add_creature_from_oracle(
+                PlayerId(0),
+                "Kappa Cannoneer",
+                4,
+                4,
+                "Improvise\nWard {4}\nWhenever this creature or another artifact you control enters, put a +1/+1 counter on this creature. It can't be blocked this turn.",
+            )
+            .as_artifact()
+            .id();
+        let artifact = scenario
+            .add_creature_to_hand(PlayerId(0), "Servo", 1, 1)
+            .as_artifact()
+            .id();
+        let blocker = scenario.add_creature(PlayerId(1), "Blocker", 2, 2).id();
+
+        let mut runner = scenario.build();
+        let mut events = Vec::new();
+        move_to_zone(runner.state_mut(), artifact, Zone::Battlefield, &mut events);
+        process_triggers(runner.state_mut(), &events);
+        assert!(
+            runner.state().stack.len() == 1,
+            "artifact ETB should put Kappa Cannoneer's trigger on the stack"
+        );
+        runner
+            .act(GameAction::PassPriority)
+            .expect("active player should pass priority");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("nonactive player should pass priority");
+
+        assert_eq!(
+            runner
+                .state()
+                .objects
+                .get(&cannoneer)
+                .unwrap()
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&1),
+            "Kappa Cannoneer's trigger should put the counter on itself"
+        );
+        assert!(
+            validate_blockers(runner.state(), &[(blocker, cannoneer)]).is_err(),
+            "Kappa Cannoneer's resolved trigger should make it unblockable this turn"
+        );
     }
 
     /// CR 509.1b + CR 301.5a: An Equipment-owned `CantBeBlocked` static must

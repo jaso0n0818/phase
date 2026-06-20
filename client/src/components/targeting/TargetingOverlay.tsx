@@ -85,6 +85,7 @@ export function TargetingOverlay() {
     activeSlot,
     targetSlots,
     selection,
+    sourceName,
     t,
   });
 
@@ -95,6 +96,37 @@ export function TargetingOverlay() {
     ? renderDescription(waitingFor.data.pending_cast.ability.description, sourceName ?? "this")
     : undefined;
   const enginePrompt = triggerDescription ?? spellTargetDescription;
+  const overlayPrompt = isCopyTargetChoice
+    ? t("targeting.choosePermanentToCopy")
+    : isCopyRetarget
+      ? (() => {
+          const slots = waitingFor.data.target_slots;
+          const hasCurrent = slots.every((slot) => slot.current != null);
+          return slots.length > 1
+            ? (hasCurrent
+                ? t("targeting.retargetCopySlot", { current: Math.min(currentTargetSlot + 1, slots.length), total: slots.length })
+                : t("targeting.chooseTargetForCopySlot", { current: Math.min(currentTargetSlot + 1, slots.length), total: slots.length }))
+            : hasCurrent ? t("targeting.chooseNewTargetForCopy") : t("targeting.chooseTargetForCopy");
+        })()
+      : isExploreChoice
+        ? t("targeting.chooseCreatureToExplore")
+        : isPopulateChoice
+          ? t("targeting.chooseCreatureTokenToPopulate")
+          : isReturnAsAuraTarget
+            ? t("targeting.chooseReturnAsAuraTarget")
+            : isRetargetChoice
+              ? (retargetSpellName
+                  ? t("targeting.chooseNewTargetForSpell", { spell: retargetSpellName })
+                  : t("targeting.chooseNewTarget"))
+              : boardChoice
+                ? boardChoicePrompt(boardChoice, selectedBoardChoiceIds, objects, t)
+                : isTapCreatureChoice
+                  ? t("targeting.tapUntappedCreatures", { count: waitingFor.data.count })
+                  : inferredPrompt ?? (
+                    targetSlots.length > 1
+                      ? t("targeting.chooseTargetOf", { current: Math.min(currentTargetSlot + 1, targetSlots.length), total: targetSlots.length })
+                      : t("targeting.chooseTarget")
+                  );
 
   const handleCancel = useCallback(() => {
     dispatch({ type: "CancelCast" });
@@ -159,39 +191,9 @@ export function TargetingOverlay() {
               {sourceName}
             </div>
           )}
-            <div className="rounded-lg bg-gray-900/90 px-6 py-2 text-lg font-semibold text-cyan-400 shadow-lg">
-            {isCopyTargetChoice
-              ? t("targeting.choosePermanentToCopy")
-              : isCopyRetarget
-                ? (() => {
-                    const slots = waitingFor.data.target_slots;
-                    const hasCurrent = slots.every((slot) => slot.current != null);
-                    return slots.length > 1
-                      ? (hasCurrent
-                          ? t("targeting.retargetCopySlot", { current: Math.min(currentTargetSlot + 1, slots.length), total: slots.length })
-                          : t("targeting.chooseTargetForCopySlot", { current: Math.min(currentTargetSlot + 1, slots.length), total: slots.length }))
-                      : hasCurrent ? t("targeting.chooseNewTargetForCopy") : t("targeting.chooseTargetForCopy");
-                  })()
-              : isExploreChoice
-                ? t("targeting.chooseCreatureToExplore")
-              : isPopulateChoice
-                ? t("targeting.chooseCreatureTokenToPopulate")
-              : isReturnAsAuraTarget
-                ? t("targeting.chooseReturnAsAuraTarget")
-              : isRetargetChoice
-                ? (retargetSpellName
-                    ? t("targeting.chooseNewTargetForSpell", { spell: retargetSpellName })
-                    : t("targeting.chooseNewTarget"))
-              : boardChoice
-                ? boardChoicePrompt(boardChoice, selectedBoardChoiceIds, objects, t)
-              : isTapCreatureChoice
-                ? t("targeting.tapUntappedCreatures", { count: waitingFor.data.count })
-              : inferredPrompt ?? (
-                targetSlots.length > 1
-                  ? t("targeting.chooseTargetOf", { current: Math.min(currentTargetSlot + 1, targetSlots.length), total: targetSlots.length })
-                  : t("targeting.chooseTarget")
-              )}
-            </div>
+          <div className="rounded-lg bg-gray-900/90 px-6 py-2 text-lg font-semibold text-cyan-400 shadow-lg">
+            <RichLabel text={overlayPrompt} />
+          </div>
           {enginePrompt && (
             <div className="max-w-md rounded-md bg-gray-800/90 px-4 py-1 text-center text-xs text-gray-300 shadow">
               <RichLabel text={enginePrompt} size="xs" />
@@ -288,6 +290,7 @@ type TargetingPromptParams = {
   activeSlot: { legal_targets: { Object?: number; Player?: number }[]; optional?: boolean } | undefined;
   targetSlots: { legal_targets: { Object?: number; Player?: number }[]; optional?: boolean }[];
   selection: { current_slot: number } | null;
+  sourceName: string | undefined;
   t: TFunction<"game">;
 };
 
@@ -297,6 +300,7 @@ function buildInferredTargetPrompt({
   activeSlot,
   targetSlots,
   selection,
+  sourceName,
   t,
 }: TargetingPromptParams): string | null {
   if (!waitingFor) return null;
@@ -314,10 +318,14 @@ function buildInferredTargetPrompt({
   const targetWord = inferTargetNoun(activeSlot.legal_targets, objects, t);
   const useUpToOne = selection && targetSlots.length === 1 && activeSlot.optional;
 
+  // CR 601.2d + CR 603.3d: Both spell target selection (`TargetSelection`) and
+  // triggered target selection (`TriggerTargetSelection`) can carry multiple
+  // slots — e.g. Inferno Titan's "divided as you choose among one, two, or three
+  // targets" surfaces three slots. The prompt must reflect that so the controller
+  // knows additional targets remain ("target 2 of 3"), instead of always reading
+  // "one target" and misleading the player into stopping early.
   let prompt: string;
-  if (waitingFor.type === "TriggerTargetSelection") {
-    prompt = useUpToOne ? t("targeting.upToOne", { target: targetWord }) : t("targeting.one", { target: targetWord });
-  } else if (targetSlots.length <= 1) {
+  if (targetSlots.length <= 1) {
     prompt = useUpToOne ? t("targeting.upToOne", { target: targetWord }) : t("targeting.one", { target: targetWord });
   } else {
     prompt = t("targeting.chooseTargetOf", { current: Math.min(selection.current_slot + 1, targetSlots.length), total: targetSlots.length });
@@ -330,7 +338,10 @@ function buildInferredTargetPrompt({
   // mode text, not localized); `prompt` is the already-localized base.
   const modeLabel = waitingFor.data.mode_labels?.[selection.current_slot];
   if (modeLabel) {
-    return t("targeting.modeContext", { mode: modeLabel, prompt });
+    return t("targeting.modeContext", {
+      mode: renderDescription(modeLabel, sourceName ?? "this"),
+      prompt,
+    });
   }
   return prompt;
 }
