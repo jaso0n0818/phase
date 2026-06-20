@@ -395,6 +395,7 @@ mod riot_control_regression;
 mod ripples_of_undeath_regression;
 mod rite_of_consumption_damage;
 mod roots_of_wisdom_if_you_cant_draw;
+mod roughshod_mentor_green_trample_grant;
 mod rules;
 mod saddle_state_model;
 mod saruman_white_hand_amass;
