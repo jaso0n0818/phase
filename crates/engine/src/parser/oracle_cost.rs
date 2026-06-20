@@ -261,6 +261,18 @@ fn parse_remove_counter_quantity_and_kind(
     {
         return Some((REMOVE_COUNTER_COST_X, counter_type));
     }
+    // CR 601.2b: "one or more [kind]" is a free player-chosen amount — the same
+    // chosen-amount path as "any number of". This MUST precede the numeric arm
+    // below: otherwise `parse_number` consumes "one" as the literal 1 and the
+    // leftover "or more [kind]" is shredded into a bogus counter kind (#3899).
+    if let Ok((_, counter_type)) = all_consuming(preceded(
+        tag::<_, _, E<'_>>("one or more "),
+        parse_remove_counter_kind,
+    ))
+    .parse(input)
+    {
+        return Some((REMOVE_COUNTER_COST_ANY_NUMBER, counter_type));
+    }
     if let Ok((_, (count, counter_type))) = all_consuming(pair(
         terminated(nom_primitives::parse_number, tag::<_, _, E<'_>>(" ")),
         parse_remove_counter_kind,
@@ -1410,6 +1422,41 @@ mod tests {
             "'any number of' should be encoded separately from literal X"
         );
         assert!(matches!(counter_type, CounterMatch::OfType(_)));
+    }
+
+    #[test]
+    fn parse_one_or_more_counters_uses_any_number_sentinel() {
+        // Issue #3899: "one or more +1/+1 counters" is a free player-chosen
+        // amount (≥1) — the same chosen-amount path as "any number of". It must
+        // NOT be consumed by the numeric arm ("one" → 1) which previously shred
+        // the leftover "or more +1/+1" into a corrupted Generic counter kind.
+        use crate::types::counter::CounterType;
+        let (count, counter_type) =
+            parse_remove_counter_quantity_and_kind("one or more +1/+1 counters")
+                .expect("should parse 'one or more' counter removal");
+        assert_eq!(
+            count, REMOVE_COUNTER_COST_ANY_NUMBER,
+            "'one or more' should use the chosen-amount sentinel, not literal 1"
+        );
+        assert_eq!(
+            counter_type,
+            CounterMatch::OfType(CounterType::Plus1Plus1),
+            "counter type must be the typed +1/+1, not a corrupted Generic string"
+        );
+    }
+
+    #[test]
+    fn parse_one_or_more_typed_counters_preserves_kind() {
+        // Issue #3899: generalizes across counter kinds (Rasputin's dream counters).
+        use crate::types::counter::CounterType;
+        let (count, counter_type) =
+            parse_remove_counter_quantity_and_kind("one or more dream counters")
+                .expect("should parse 'one or more dream counters'");
+        assert_eq!(count, REMOVE_COUNTER_COST_ANY_NUMBER);
+        assert_eq!(
+            counter_type,
+            CounterMatch::OfType(CounterType::Generic("dream".to_string()))
+        );
     }
 
     #[test]
