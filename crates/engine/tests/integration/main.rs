@@ -382,6 +382,7 @@ mod overload_no_legal_target;
 mod oversimplify_per_player_fractal;
 mod ozolith_leaves_battlefield_counters;
 mod peer_into_the_abyss;
+mod pendrell_flux_unless_pay_own_cost;
 mod peter_parker_modal_back_face_cast;
 mod phantom_general_token_anthem;
 mod plaguecrafter_etb_class;

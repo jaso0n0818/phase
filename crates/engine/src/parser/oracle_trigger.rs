@@ -1916,6 +1916,26 @@ fn parse_unless_discard_cost(discard_tail: &str) -> Option<AbilityCost> {
 /// 2026-05-09 fold, the `random: bool` field on `AbilityCost::Discard` is
 /// the natural home for this; wiring it into the runtime is future work.
 fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
+    // CR 118.12 + CR 202.1: "you pay its mana cost" / "you pay ~'s mana cost" —
+    // the unless cost is the ability source's OWN printed mana cost, which is
+    // dynamic: it depends on the permanent the granting Aura is attached to
+    // (Pendrell Flux, Disruption Aura, Pendrell Mists). Represent it with
+    // `ManaCost::SelfManaCost`; the unless-pay resolver materializes it to the
+    // source's `mana_cost` at resolution time. Checked before the "you pay N
+    // life" arm below, with which it shares the "you pay " prefix.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you pay ").parse(after_unless) {
+        let tail = rest.trim_end_matches('.').trim();
+        let is_self_mana_cost = tag::<_, _, OracleError<'_>>("its mana cost")
+            .parse(tail)
+            .or_else(|_| tag::<_, _, OracleError<'_>>("~'s mana cost").parse(tail))
+            .map(|(after, _)| after.trim().is_empty())
+            .unwrap_or(false);
+        if is_self_mana_cost {
+            return Some(AbilityCost::Mana {
+                cost: crate::types::mana::ManaCost::SelfManaCost,
+            });
+        }
+    }
     // "you discard a card" — match prefix, accept any trailing modifiers
     // ("at random", trailing punctuation) since the caller strips the entire
     // unless-clause wholesale.
@@ -21471,15 +21491,26 @@ mod tests {
     }
 
     #[test]
-    fn trigger_unless_you_pay_mana_cost_is_not_unless_pay() {
+    fn trigger_unless_you_pay_its_mana_cost_is_self_mana_cost() {
+        // #3791: "unless you pay its mana cost" is now recognized — the cost is
+        // the ability source's own printed mana cost, represented as
+        // `ManaCost::SelfManaCost` and materialized to the source's mana_cost at
+        // resolution time (Pendrell Flux, Disruption Aura, Pendrell Mists).
         let def = parse_trigger_line(
             "When this creature enters, draw a card unless you pay its mana cost.",
             "Test Card",
         );
-        assert!(
-            def.unless_pay.is_none(),
-            "\"pay its mana cost\" is not a recognized unless-cost, got {:?}",
-            def.unless_pay
+        let unless = def
+            .unless_pay
+            .as_ref()
+            .expect("\"pay its mana cost\" must be recognized as an unless-cost");
+        assert_eq!(
+            unless.cost,
+            AbilityCost::Mana {
+                cost: crate::types::mana::ManaCost::SelfManaCost,
+            },
+            "\"pay its mana cost\" must lower to Mana{{SelfManaCost}}, got {:?}",
+            unless.cost
         );
     }
 

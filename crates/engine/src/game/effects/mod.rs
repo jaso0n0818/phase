@@ -5192,6 +5192,22 @@ fn resolve_chain_body(
                         cost: ManaCost::generic(amount.max(0) as u32),
                     }
                 }
+                // CR 118.12 + CR 202.1: "unless you pay its mana cost" — materialize
+                // the ability source's OWN printed mana cost at resolution time. The
+                // cost is dynamic because the granting Aura can be attached to any
+                // permanent (Pendrell Flux, Disruption Aura). An absent source or a
+                // costless source resolves to no cost, which the CR 118.5 zero-cost
+                // short-circuit below treats as "always payable".
+                AbilityCost::Mana {
+                    cost: ManaCost::SelfManaCost,
+                } => {
+                    let cost = state
+                        .objects
+                        .get(&ability.source_id)
+                        .map(|obj| obj.mana_cost.clone())
+                        .unwrap_or(ManaCost::NoCost);
+                    AbilityCost::Mana { cost }
+                }
                 other => other.clone(),
             };
             // CR 118.5 + CR 118.12a: Zero-mana unless cost short-circuit.
