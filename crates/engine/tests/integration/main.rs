@@ -377,6 +377,7 @@ mod obliterate_regression;
 mod old_growth_troll_return_as_aura;
 mod omo_queen_of_vesuva;
 mod oracle_parser;
+mod orim_reach_grant;
 mod overload_no_legal_target;
 mod oversimplify_per_player_fractal;
 mod ozolith_leaves_battlefield_counters;
