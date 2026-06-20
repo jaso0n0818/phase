@@ -329,6 +329,7 @@ mod issue_927_tireless_provisioner;
 mod jace_wielder_empty_library_win;
 mod json_smoke_test;
 mod kaito_integration;
+mod kaysa_green_anthem;
 mod knighthood_first_strike_grant;
 mod knollspine_dragon_target_damage_draw;
 mod kodama_anti_recursion_intervening_if;
