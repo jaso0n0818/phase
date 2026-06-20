@@ -1271,19 +1271,23 @@ fn parse_restricted_spell_type_phrase(spell_part: &str) -> Option<String> {
 }
 
 /// CR 106.6: Parse the negative spend restriction "this mana can't be spent to
-/// cast non<TYPE> spells" into a `SpellTypeOrAbilityActivation` whose `spell_type`
-/// is `<TYPE>` (the phrase with the leading "non" stripped) and whose ability
-/// scope is `Any`. The double-negative restricts spell-casting to `<TYPE>` spells
-/// while leaving every ability activation payable (CR 605/602) — Karn, Legacy
-/// Reforged. Returns `None` for any other phrasing so the positive-form parser
-/// and the existing gap behavior are untouched.
+/// cast [a/an] non<TYPE> spell(s)" into a `SpellTypeOrAbilityActivation` whose
+/// `spell_type` is `<TYPE>` (the phrase with the leading "non" stripped) and
+/// whose ability scope is `Any`. The double-negative restricts spell-casting to
+/// `<TYPE>` spells while leaving every ability activation payable (CR 605/602) —
+/// Karn, Legacy Reforged; Hydraulic Helper. Returns `None` for any other
+/// phrasing so the positive-form parser and the existing gap behavior are
+/// untouched.
 fn parse_negative_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestriction> {
     let (_, rest) = nom_on_lower(lower, lower, |i| {
-        value((), tag("this mana can't be spent to cast non")).parse(i)
+        let (i, _) = tag("this mana can't be spent to cast ").parse(i)?;
+        let (i, _) = opt(nom_primitives::parse_article).parse(i)?;
+        value((), alt((tag("non-"), tag("non")))).parse(i)
     })?;
     let rest = rest.trim().trim_end_matches(['.', '"']).trim();
-    // `rest` is now "<type> spells" (the "non" prefix already consumed); reuse
-    // the shared type-phrase combinator to canonicalize the spell type.
+    // `rest` is now "<type> spell(s)" (the article and "non" prefix already
+    // consumed); reuse the shared type-phrase combinator to canonicalize the
+    // spell type.
     let spell_type = parse_restricted_spell_type_phrase(rest)?;
     Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
         spell_type,

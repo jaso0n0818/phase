@@ -14265,6 +14265,25 @@ mod tests {
     }
 
     #[test]
+    fn mana_spend_restriction_negative_article_singular_nonartifact() {
+        // CR 106.6: singular/article wording is the same restriction class
+        // (Hydraulic Helper: "a nonartifact spell"), and ability activation is
+        // still unrestricted because the clause only forbids casting spells.
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "this mana can't be spent to cast a nonartifact spell",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(
+                crate::types::ability::ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type: "Artifact".to_string(),
+                    ability: crate::types::mana::AbilityActivationScope::Any,
+                }
+            )
+        );
+    }
+
+    #[test]
     fn mana_spend_restriction_negative_noncreature() {
         // CR 106.6: the negative form generalizes across spell types — "non<TYPE>"
         // strips to "<TYPE>" so the same combinator covers the whole class.
