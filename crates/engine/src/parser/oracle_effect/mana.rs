@@ -1270,6 +1270,27 @@ fn parse_restricted_spell_type_phrase(spell_part: &str) -> Option<String> {
     )
 }
 
+/// CR 106.6: Parse the negative spend restriction "this mana can't be spent to
+/// cast non<TYPE> spells" into a `SpellTypeOrAbilityActivation` whose `spell_type`
+/// is `<TYPE>` (the phrase with the leading "non" stripped) and whose ability
+/// scope is `Any`. The double-negative restricts spell-casting to `<TYPE>` spells
+/// while leaving every ability activation payable (CR 605/602) — Karn, Legacy
+/// Reforged. Returns `None` for any other phrasing so the positive-form parser
+/// and the existing gap behavior are untouched.
+fn parse_negative_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestriction> {
+    let (_, rest) = nom_on_lower(lower, lower, |i| {
+        value((), tag("this mana can't be spent to cast non")).parse(i)
+    })?;
+    let rest = rest.trim().trim_end_matches(['.', '"']).trim();
+    // `rest` is now "<type> spells" (the "non" prefix already consumed); reuse
+    // the shared type-phrase combinator to canonicalize the spell type.
+    let spell_type = parse_restricted_spell_type_phrase(rest)?;
+    Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+        spell_type,
+        ability: AbilityActivationScope::Any,
+    })
+}
+
 fn normalize_restricted_source_phrase(phrase: &str) -> String {
     phrase
         .split_whitespace()
@@ -1365,6 +1386,18 @@ fn split_restricted_spell_and_activation(rest: &str) -> (&str, ActivationTail) {
 pub(crate) fn parse_mana_spend_restriction(
     lower: &str,
 ) -> Option<(ManaSpendRestriction, Vec<ManaSpellGrant>)> {
+    // CR 106.6: Negative spend restriction — "this mana can't be spent to cast
+    // non<TYPE> spells" (Karn, Legacy Reforged). The double negative ("can't
+    // cast non<TYPE>") is the spell-side equivalent of "only to cast <TYPE>",
+    // but — unlike the positive "spend this mana only …" form — it places NO
+    // restriction on ability activation: the clause forbids only the *casting*
+    // of non-<TYPE> spells. Lower it to `SpellTypeOrAbilityActivation` (any
+    // ability stays payable) rather than `SpellType` (spells-only), which would
+    // wrongly forbid paying for abilities.
+    if let Some(restriction) = parse_negative_mana_spend_restriction(lower) {
+        return Some((restriction, vec![]));
+    }
+
     let (_, base) = nom_on_lower(lower, lower, |i| {
         value((), tag("spend this mana only ")).parse(i)
     })?;
