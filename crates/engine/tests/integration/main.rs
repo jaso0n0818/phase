@@ -39,6 +39,7 @@ mod charging_cinderhorn_issue_2868;
 mod chatterstorm_storm;
 mod cleave_text_changing_cost;
 mod cloud_key_chosen_type_cost;
+mod cloudshredder_sliver_flying_haste_grant;
 mod coalition_relic_integration;
 mod combat_celebrant_exert;
 mod combat_damage_order_triggers_no_hang;
