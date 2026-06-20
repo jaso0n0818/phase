@@ -23,6 +23,7 @@ mod banding_combat;
 mod batched_trigger_subject_count;
 mod belbe_thornbow_life_loss;
 mod betor_lifelink_counters_repro;
+mod blessed_orator_other_anthem;
 mod bolas_citadel_regression;
 mod boon_reflection_gain_life_drain;
 mod bounce_destination_redirect;
