@@ -9,7 +9,7 @@
 //! opponent's OWN turn, because the parser dropped the leading "During your
 //! turn," timing restriction (the static parsed with `condition: None`).
 //!
-//! CR 117.1a: "your turn" is the turn of the permanent's controller. Two fixes
+//! CR 102.1: the active player is the player whose turn it is. Two fixes
 //! combine here: the cost-modifier parser now attaches
 //! `StaticCondition::DuringYourTurn`, and that condition is evaluated against
 //! the source permanent's controller (not the caster) so it is correct in the
@@ -48,7 +48,7 @@ fn resolved_cost_mana_value(runner: &mut GameRunner, spell_id: ObjectId) -> u32 
 
 #[test]
 fn tithe_taker_static_parses_with_during_your_turn_condition() {
-    // CR 117.1a: the leading "During your turn," timing restriction must lower
+    // CR 102.1: the leading "During your turn," timing restriction must lower
     // to a `StaticCondition::DuringYourTurn` gate on the cost-raise static —
     // not be silently dropped (which left `condition: None`, the root cause).
     let def = parse_static_line(TITHE_TAKER).expect("Tithe Taker static should parse");
@@ -79,7 +79,7 @@ fn tithe_taker_does_not_tax_opponent_on_their_own_turn() {
     assert_eq!(
         resolved_cost_mana_value(&mut runner, spell_id),
         0,
-        "Tithe Taker must NOT tax an opponent's spell on the opponent's own turn (CR 117.1a)",
+        "Tithe Taker must NOT tax an opponent's spell on the opponent's own turn (CR 102.1)",
     );
 }
 

@@ -963,7 +963,7 @@ fn evaluate_condition_with_context(
         // already constrains source availability before this static is evaluated.
         StaticCondition::ClassLevelGE { level } => eval_class_level_ge(state, source_id, *level),
         StaticCondition::Unrecognized { .. } => true,
-        // CR 117.1a: "during your turn" means the turn of the static's source
+        // CR 102.1: "during your turn" means the turn of the static's source
         // controller — never the caster. Most call sites pass the source's
         // controller as `controller`, but the cost-modification resolver passes
         // the *caster* (so caster-relative conditions like SpellsCastThisTurn
