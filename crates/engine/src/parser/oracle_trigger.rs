@@ -4332,6 +4332,7 @@ fn try_extract_cast_variant_paid_condition(
         ("ninjutsu cost was paid", CastVariantPaid::Ninjutsu),
         ("surge cost was paid", CastVariantPaid::Surge), // CR 702.117a
         ("spectacle cost was paid", CastVariantPaid::Spectacle), // CR 702.137a
+        ("prowl cost was paid", CastVariantPaid::Prowl), // CR 702.76a
     ] {
         if scan_contains(lower, keyword) && !scan_contains(lower, "instead") {
             let pos = tp.find("if ").unwrap_or(0);
