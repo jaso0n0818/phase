@@ -4,7 +4,7 @@
 //! Regression coverage for a continuous static that jointly exercises filter
 //! axes existing anthem/grant tests don't cover together:
 //!   - **other** — the source itself is excluded (no self-buff / self-grant),
-//!   - **controller** — "you control" scopes to the source's controller (CR 109.4),
+//!   - **controller** — "you control" scopes to the source's controller (CR 109.5),
 //!   - **subtype** — only Soldiers qualify (CR 205.3m),
 //!   - **dual effect** — one static both pumps P/T (Layer 7c, CR 613.4c) AND
 //!     grants a keyword (Layer 6 ability-adding, CR 613.1f).
@@ -140,7 +140,7 @@ fn field_marshal_buff_turns_off_when_source_leaves() {
         "baseline: first strike while the source is present"
     );
 
-    // CR 611.3 + CR 603.6a: the continuous effect ends when its source leaves the
+    // CR 611.3b: the continuous effect ends when its source leaves the
     // battlefield. Move it to the graveyard (rules-correct — the card persists,
     // it just stops being on the battlefield), not delete it from existence.
     let mut events = Vec::new();
