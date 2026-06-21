@@ -4,53 +4,84 @@
 //! Oracle: "Flying\nProwl {2}{U}\nWhen this creature enters, if its prowl cost
 //! was paid, draw a card."
 //!
-//! CR 702.76a + CR 603.4: "prowl cost was paid" is a cast-variant provenance
-//! tag (`CastVariantPaid::Prowl`) recorded at resolution. The ETB intervening-if
-//! must draw only when the permanent was cast for its prowl cost.
+//! Two coupled fixes are exercised here, end-to-end through the real cast
+//! pipeline (no manual tagging):
+//!   1. The parser lowers "if its prowl cost was paid" to
+//!      `TriggerCondition::CastVariantPaid { Prowl }` (CR 702.76a + CR 603.4).
+//!   2. Prowl is wired into the normal-vs-alternative cast flow
+//!      (`AlternativeCastKeyword::Prowl`), so a single-Prowl card can actually be
+//!      cast for its prowl cost; `stack.rs` tags `cast_variant_paid = Prowl` at
+//!      resolution, which the intervening-if reads.
 
 use engine::game::scenario::{GameScenario, P0};
-use engine::game::zones::move_to_zone;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{CastVariantPaid, TriggerCondition};
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
-use engine::types::zones::Zone;
 
 const LATCHKEY: &str =
     "Flying\nProwl {2}{U}\nWhen this creature enters, if its prowl cost was paid, draw a card.";
 
-/// Enter Latchkey from hand (firing its ETB), optionally tagged as a prowl cast,
-/// and return how many cards the controller drew (library shrinkage).
-fn draws_on_enter(prowl_paid: bool) -> usize {
+fn mana_pool(generic: usize, blue: usize) -> Vec<ManaUnit> {
+    let mut pool = Vec::new();
+    for _ in 0..generic {
+        pool.push(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    }
+    for _ in 0..blue {
+        pool.push(ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]));
+    }
+    pool
+}
+
+/// Cast Latchkey from hand through the real pipeline — via its prowl cost when
+/// `prowl` is set — and return how many cards the controller drew (library
+/// shrinkage) once its ETB has resolved.
+fn library_drawn_via_cast(prowl: bool) -> usize {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let latchkey = scenario
         .add_creature_to_hand_from_oracle(P0, "Latchkey Faerie", 2, 2, LATCHKEY)
+        .with_subtypes(vec!["Faerie", "Rogue"])
+        // Printed cost {3}{U}: the prowl alternative ({2}{U}) is then a genuine
+        // distinct choice rather than a free hard-cast.
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 3,
+        })
         .id();
     scenario.add_card_to_library_top(P0, "Island");
     scenario.add_card_to_library_top(P0, "Mountain");
+    // Prowl case: exactly {2}{U} (3 mana) so the printed {3}{U} is UNaffordable
+    // and the only payable option is prowl — the engine auto-routes to the
+    // prowl alternative cast (a real cast through the new normal-vs-prowl path),
+    // tagging cast_variant_paid = Prowl at resolution. Hard-cast case: {3}{U} is
+    // affordable and no prowl eligibility is seeded → a normal cast.
+    let pool = if prowl {
+        mana_pool(2, 1)
+    } else {
+        mana_pool(3, 1)
+    };
+    scenario.with_mana_pool(P0, pool);
 
     let mut runner = scenario.build();
     runner.state_mut().active_player = P0;
-    let library_before = runner.state().players[P0.0 as usize].library.len();
-
-    // Move Latchkey to the battlefield (generates the ETB ZoneChanged event).
-    let mut events = Vec::new();
-    move_to_zone(runner.state_mut(), latchkey, Zone::Battlefield, &mut events);
-
-    // Tag the cast provenance after entry (battlefield-entry reset clears it),
-    // mirroring the post-resolution tagging the stack does for a real prowl cast.
-    if prowl_paid {
-        let turn = runner.state().turn_number;
+    if prowl {
+        // CR 702.76a: prowl is legal because a Faerie the caster controlled dealt
+        // combat damage to a player this turn (the per-turn creature-type ledger).
         runner
             .state_mut()
-            .objects
-            .get_mut(&latchkey)
-            .unwrap()
-            .cast_variant_paid = Some((CastVariantPaid::Prowl, turn));
+            .creature_types_dealt_combat_damage_this_turn
+            .insert((P0, "Faerie".to_string()));
     }
+    let library_before = runner.state().players[P0.0 as usize].library.len();
 
-    engine::game::triggers::process_triggers(runner.state_mut(), &events);
-    runner.advance_until_stack_empty();
+    runner.cast(latchkey).resolve();
 
     library_before.saturating_sub(runner.state().players[P0.0 as usize].library.len())
 }
@@ -82,11 +113,11 @@ fn latchkey_etb_is_gated_on_prowl_cost_paid() {
 }
 
 #[test]
-fn latchkey_draws_when_prowl_cost_was_paid() {
+fn latchkey_draws_when_cast_for_its_prowl_cost() {
     assert_eq!(
-        draws_on_enter(true),
+        library_drawn_via_cast(true),
         1,
-        "Latchkey must draw a card when its prowl cost was paid"
+        "Latchkey must draw a card when actually cast for its prowl cost"
     );
 }
 
@@ -94,7 +125,7 @@ fn latchkey_draws_when_prowl_cost_was_paid() {
 fn latchkey_does_not_draw_when_hard_cast() {
     // The reported bug: it drew irrespective of whether prowl was paid.
     assert_eq!(
-        draws_on_enter(false),
+        library_drawn_via_cast(false),
         0,
         "Latchkey must NOT draw when it was not cast for its prowl cost"
     );
